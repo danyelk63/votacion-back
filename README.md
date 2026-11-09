@@ -195,6 +195,8 @@ mvn test
 
 ## Publicación en Render (gratis)
 
+**En línea:** https://votacion-back-u8f6.onrender.com (por ejemplo `/api/cluster`). El frontend publicado está en https://votacion-front.vercel.app.
+
 El repo incluye un [`Dockerfile`](Dockerfile) y un [`render.yaml`](render.yaml). Como Render da **una sola máquina y un solo puerto público**, el contenedor arranca ([`docker/arranque.sh`](docker/arranque.sh)):
 
 - los **3 nodos y el gateway como 4 procesos JVM independientes**, que se siguen comunicando por RMI igual que en local;
