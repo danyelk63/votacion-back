@@ -38,6 +38,12 @@ public interface NodoVotacion extends Remote {
      */
     ResultadoRegistro registrarVoto(SolicitudRegistro solicitud) throws RemoteException, VotoRechazadoException;
 
+    /**
+     * Borra TODOS los votos del clúster. Se replica por Raft como una entrada más
+     * del log, así cada nodo borra exactamente los mismos votos (y su archivo).
+     */
+    ResultadoBorrado borrarVotos(SolicitudBorrado solicitud) throws RemoteException, VotoRechazadoException;
+
     /** Conteo de votos. Si {@code soloLocal} es false, se consulta al líder (lectura consistente). */
     Resultados resultados(boolean soloLocal) throws RemoteException;
 

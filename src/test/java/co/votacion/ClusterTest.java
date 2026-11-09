@@ -285,4 +285,33 @@ class ClusterTest {
         assertTrue(usuariosLog.stream().anyMatch(l -> l.contains("VOTAR") && l.contains("ACEPTADO") && l.contains(traza)));
         assertTrue(usuariosLog.stream().noneMatch(l -> l.contains("52998877")), "la cédula va enmascarada en el log de usuarios");
     }
+
+    @Test
+    @Order(9)
+    void borrarVotosLosEliminaDeTodosLosNodosYDeSusArchivosPorConsenso() throws Exception {
+        esperarLider(null);
+        assertEquals(200, api("POST", "/api/votos", voto("Elena Paz", "41222333", "C2")).status());
+        int antes = votosEn(1);
+        assertTrue(antes > 0);
+
+        Http r = api("DELETE", "/api/votos", null);
+        assertEquals(200, r.status(), r.cuerpo().toString());
+        assertEquals(antes, r.cuerpo().get("votosBorrados"));
+        String traza = (String) r.cuerpo().get("traza");
+
+        esperarHasta(() -> votosEn(1) == 0 && votosEn(2) == 0 && votosEn(3) == 0, "los 3 nodos sin votos");
+        assertEquals(0, api("GET", "/api/resultados", null).cuerpo().get("total"));
+        esperarHasta(() -> gateway.central().historial().stream()
+                .filter(e -> traza.equals(e.traza()) && "ARCHIVO_REINICIADO".equals(e.etapa())).count() == 3, "3 archivos reiniciados");
+        for (DireccionNodo d : DIRS) {
+            List<String> lineas = Files.readAllLines(datos.resolve("nodo-" + d.id()).resolve("votos.txt"));
+            assertTrue(lineas.stream().allMatch(l -> l.startsWith("#")), "votos.txt del nodo " + d.id() + " vacío: " + lineas);
+        }
+        assertTrue(Files.readAllLines(datos.resolve("gateway").resolve("usuarios.log")).stream()
+                .anyMatch(l -> l.contains("BORRAR_VOTOS") && l.contains(traza)));
+
+        // Tras el borrado, la misma cédula puede volver a votar
+        assertEquals(200, api("POST", "/api/votos", voto("Elena Paz", "41222333", "C1")).status());
+        esperarHasta(() -> votosEn(1) == 1 && votosEn(2) == 1 && votosEn(3) == 1, "nuevo voto replicado");
+    }
 }

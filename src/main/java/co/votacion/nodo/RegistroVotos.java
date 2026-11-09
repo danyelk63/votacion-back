@@ -31,6 +31,12 @@ public class RegistroVotos {
         Candidato.TODOS.forEach(c -> conteo.put(c.id(), 0));
     }
 
+    void reiniciar() {
+        porCedula.clear();
+        enOrden.clear();
+        conteo.replaceAll((k, v) -> 0);
+    }
+
     boolean yaVoto(String cedula) {
         return porCedula.containsKey(cedula);
     }

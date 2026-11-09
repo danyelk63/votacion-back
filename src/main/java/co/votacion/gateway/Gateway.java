@@ -6,7 +6,9 @@ import co.votacion.comun.ClienteRmi;
 import co.votacion.comun.DireccionNodo;
 import co.votacion.comun.EstadoNodo;
 import co.votacion.comun.Evento;
+import co.votacion.comun.ResultadoBorrado;
 import co.votacion.comun.ResultadoRegistro;
+import co.votacion.comun.SolicitudBorrado;
 import co.votacion.comun.SolicitudRegistro;
 import co.votacion.comun.VotoRechazadoException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -52,6 +54,7 @@ import java.util.regex.Pattern;
  * GET  /api/resultados
  * GET  /api/votos
  * POST /api/votos                  {"nombre","cedula","candidato"}
+ * DELETE /api/votos                borra todos los votos (por consenso en todo el clúster)
  * GET  /api/cluster
  * POST /api/cluster/{id}/pausar
  * POST /api/cluster/{id}/reanudar
@@ -187,6 +190,8 @@ public class Gateway {
                 r = conFailover(n -> n.llamar(s -> s.votos(false)), null).respuesta();
             } else if (metodo.equals("POST") && ruta.equals("/api/votos")) {
                 r = registrarVoto(ex);
+            } else if (metodo.equals("DELETE") && ruta.equals("/api/votos")) {
+                r = borrarVotos(ex);
             } else if (metodo.equals("GET") && ruta.equals("/api/cluster")) {
                 r = estadoCluster();
             } else if (metodo.equals("POST") && admin.matches()) {
@@ -227,7 +232,7 @@ public class Gateway {
                 texto(cuerpo.get("candidato")), null, traza);
 
         central.gateway("VOTO", "RECIBIDO_HTTP", traza, "Llega POST /api/votos desde el navegador (HTTP/JSON). Se asigna la traza " + traza,
-                Evento.datos("ip", ip, "navegador", navegador, "nombre", solicitud.nombre(),
+                Evento.datos("accion", "VOTAR", "ip", ip, "navegador", navegador, "nombre", solicitud.nombre(),
                         "cedula", Evento.enmascarar(solicitud.cedula()), "candidato", solicitud.candidato()));
 
         ResultadoFailover res = conFailover(n -> {
@@ -256,6 +261,49 @@ public class Gateway {
         }
         usuarios.registrar(new BitacoraUsuarios.Accion("VOTAR", resultado, solicitud.nombre(), solicitud.cedula(),
                 solicitud.candidato(), ip, navegador, res.nodo(), traza, detalle));
+
+        if (r.cuerpo() instanceof Map<?, ?> m) {
+            Map<String, Object> conTraza = new LinkedHashMap<>();
+            m.forEach((k, v) -> conTraza.put(String.valueOf(k), v));
+            conTraza.put("traza", traza);
+            conTraza.put("duracionMs", ms);
+            return new Respuesta(r.status(), conTraza);
+        }
+        return r;
+    }
+
+    /** Borra todos los votos: la orden se replica por Raft a todos los nodos. */
+    private Respuesta borrarVotos(HttpExchange ex) {
+        long inicio = System.nanoTime();
+        String traza = UUID.randomUUID().toString().substring(0, 8);
+        String ip = ex.getRemoteAddress().getAddress().getHostAddress();
+        String navegador = navegador(ex.getRequestHeaders().getFirst("User-Agent"));
+        SolicitudBorrado solicitud = new SolicitudBorrado(null, traza);
+
+        central.gateway("VOTO", "RECIBIDO_HTTP", traza, "Llega DELETE /api/votos desde el navegador: orden de borrar todos los votos. Se asigna la traza " + traza,
+                Evento.datos("accion", "BORRAR_VOTOS", "ip", ip, "navegador", navegador));
+        ResultadoFailover res = conFailover(n -> {
+            central.gateway("RED", "LLAMADA_RMI", traza, "Invoca borrarVotos() en el nodo " + n.id() + " por RMI",
+                    Evento.datos("destino", n.direccion()));
+            return n.llamar(s -> s.borrarVotos(solicitud));
+        }, traza);
+        long ms = (System.nanoTime() - inicio) / 1_000_000;
+        Respuesta r = res.respuesta();
+        central.gateway("VOTO", "RESPUESTA_HTTP", traza, "Responde HTTP " + r.status() + " al navegador",
+                Evento.datos("duracionMs", ms, "nodoAtendio", res.nodo()));
+
+        String resultado;
+        String detalle;
+        if (r.status() == 200) {
+            ResultadoBorrado rb = json.convertValue(r.cuerpo(), ResultadoBorrado.class);
+            resultado = "OK";
+            detalle = rb.votosBorrados() + " voto(s) borrados con la orden #" + rb.indiceLog() + " del líder nodo " + rb.lider();
+        } else {
+            resultado = res.rechazo() != null ? "RECHAZADO_" + res.rechazo().getCodigo().name() : "ERROR_" + r.status();
+            detalle = res.rechazo() != null ? res.rechazo().getMessage() : "clúster no disponible";
+        }
+        usuarios.registrar(new BitacoraUsuarios.Accion("BORRAR_VOTOS", resultado, null, null, null, ip, navegador,
+                res.nodo(), traza, detalle));
 
         if (r.cuerpo() instanceof Map<?, ?> m) {
             Map<String, Object> conTraza = new LinkedHashMap<>();
@@ -406,7 +454,7 @@ public class Gateway {
 
     private static void agregarCors(HttpExchange ex) {
         ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
-        ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
     }
 

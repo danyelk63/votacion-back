@@ -144,6 +144,7 @@ Hay que abrir en el firewall los puertos 1100–1103, 8080 y 8081. El gateway ta
 | GET | `/api/candidatos` | Lista de candidatos |
 | POST | `/api/votos` | Registrar voto: `{"nombre":"Ana Pérez","cedula":"1012345678","candidato":"C1"}` |
 | GET | `/api/votos` | Votos registrados (cédula enmascarada) |
+| DELETE | `/api/votos` | Borra todos los votos de todo el clúster. Se replica por Raft como una entrada `REINICIO` del log |
 | GET | `/api/resultados` | Conteo y porcentaje por candidato |
 | GET | `/api/cluster` | Estado de cada nodo: rol, término, líder, log, réplicas |
 | POST | `/api/cluster/{id}/pausar` | Simula la caída de un nodo |
@@ -183,6 +184,7 @@ mvn test
 - nueva elección tras la caída del líder y recuperación del nodo caído
 - rechazo de votos cuando no hay mayoría
 - mismo orden de votos en todos los nodos ante peticiones concurrentes
+- borrado de votos por consenso: los 3 nodos y sus `votos.txt` quedan vacíos y la misma cédula puede volver a votar
 - trazabilidad completa: todas las etapas de un voto llegan por WebSocket, y el voto queda en los 3 `votos.txt` y en `usuarios.log`
 
 ## Limitaciones (a propósito, por ser académico)

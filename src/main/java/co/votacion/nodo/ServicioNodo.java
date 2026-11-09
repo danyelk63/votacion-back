@@ -11,7 +11,9 @@ import co.votacion.comun.NodoNoDisponibleException;
 import co.votacion.comun.NodoVotacion;
 import co.votacion.comun.RespuestaAnexar;
 import co.votacion.comun.RespuestaVoto;
+import co.votacion.comun.ResultadoBorrado;
 import co.votacion.comun.ResultadoRegistro;
+import co.votacion.comun.SolicitudBorrado;
 import co.votacion.comun.Resultados;
 import co.votacion.comun.SolicitudAnexar;
 import co.votacion.comun.SolicitudRegistro;
@@ -102,6 +104,39 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
         } catch (Exception e) {
             raft.ev("RED", "LIDER_INACCESIBLE", s.traza(), "El líder (nodo " + liderId + ") no responde por RMI", null);
             throw new VotoRechazadoException(Codigo.SIN_LIDER, "El líder no responde, intente de nuevo");
+        }
+    }
+
+    @Override
+    public ResultadoBorrado borrarVotos(SolicitudBorrado s) throws RemoteException, VotoRechazadoException {
+        verificarDisponible();
+        raft.ev("VOTO", "RECIBIDO_RMI", s.traza(), "Llega la invocación remota borrarVotos() desde "
+                + (s.reenviadoPor() == null ? "el gateway" : "el nodo " + s.reenviadoPor()), null);
+        try {
+            Object[] r = raft.borrarComoLider(s.traza());
+            EntradaLog e = (EntradaLog) r[0];
+            return new ResultadoBorrado("Votos borrados en todos los nodos del clúster", (Integer) r[1], e.indice(),
+                    e.termino(), raft.id(), s.reenviadoPor());
+        } catch (NodoRaft.NoEsLiderException e) {
+            Integer liderId = e.liderId;
+            if (liderId == null || s.reenviadoPor() != null) {
+                raft.ev("VOTO", "SIN_LIDER", s.traza(), "No es el líder y no conoce un líder vigente: pide reintentar", null);
+                throw new VotoRechazadoException(Codigo.SIN_LIDER, "No hay líder disponible en este momento, intente de nuevo");
+            }
+            ClienteRmi lider = raft.par(liderId);
+            raft.ev("VOTO", "REENVIO_LIDER", s.traza(), "No es el líder: solo el líder puede escribir. Reenvía la orden al nodo "
+                    + liderId + " por RMI", Evento.datos("destino", lider.direccion()));
+            try {
+                return lider.llamar(n -> n.borrarVotos(s.reenviadaPor(raft.id())));
+            } catch (VotoRechazadoException ex) {
+                throw ex;
+            } catch (Exception ex) {
+                raft.ev("RED", "LIDER_INACCESIBLE", s.traza(), "El líder (nodo " + liderId + ") no responde por RMI", null);
+                throw new VotoRechazadoException(Codigo.SIN_LIDER, "El líder no responde, intente de nuevo");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RemoteException("Interrumpido", e);
         }
     }
 

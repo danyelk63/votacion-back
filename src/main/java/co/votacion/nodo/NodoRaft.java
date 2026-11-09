@@ -281,7 +281,7 @@ public class NodoRaft {
         }
         ev("ELECCION", "NUEVO_LIDER", null, "Ganó la elección: ahora es el LÍDER del término " + terminoActual, null);
         // Entrada noop: permite confirmar entradas de términos anteriores (§5.4.2 del paper).
-        anexar(EntradaLog.Tipo.NOOP, null);
+        anexar(EntradaLog.Tipo.NOOP, null, null);
         avanzarConfirmacion();
         iniciarLatidos();
     }
@@ -331,8 +331,8 @@ public class NodoRaft {
 
     // ================================================================== replicación del log
 
-    private EntradaLog anexar(EntradaLog.Tipo tipo, Voto voto) {
-        EntradaLog e = new EntradaLog(ultimoIndice() + 1, terminoActual, UUID.randomUUID().toString(), tipo, voto);
+    private EntradaLog anexar(EntradaLog.Tipo tipo, Voto voto, String traza) {
+        EntradaLog e = new EntradaLog(ultimoIndice() + 1, terminoActual, UUID.randomUUID().toString(), tipo, voto, traza);
         registro.add(e);
         return e;
     }
@@ -353,8 +353,8 @@ public class NodoRaft {
         SolicitudAnexar solicitud = new SolicitudAnexar(termino, id, previo, registro.get(previo).termino(),
                 entradas, indiceConfirmado);
         for (EntradaLog e : entradas) {
-            if (e.tipo() == EntradaLog.Tipo.VOTO) {
-                ev("REPLICACION", "ENVIO", e.voto().traza(), "Envía la entrada #" + e.indice()
+            if (e.rastreable()) {
+                ev("REPLICACION", "ENVIO", e.traza(), "Envía la " + e.descripcion()
                         + " al nodo " + par.id() + " (anexarEntradas por RMI)", Evento.datos("destino", par.id()));
             }
         }
@@ -375,9 +375,9 @@ public class NodoRaft {
                     if (rol != Rol.LIDER || terminoActual != termino) return;
                     if (r.exito()) {
                         for (EntradaLog e : entradas) {
-                            if (e.tipo() == EntradaLog.Tipo.VOTO) {
-                                ev("REPLICACION", "ACK", e.voto().traza(), "El nodo " + par.id()
-                                        + " confirma que guardó la entrada #" + e.indice() + " en su log",
+                            if (e.rastreable()) {
+                                ev("REPLICACION", "ACK", e.traza(), "El nodo " + par.id()
+                                        + " confirma que guardó la " + e.descripcion() + " en su log",
                                         Evento.datos("seguidor", par.id()));
                             }
                         }
@@ -420,8 +420,8 @@ public class NodoRaft {
             if (replicas >= mayoria()) {
                 for (int k = indiceConfirmado + 1; k <= n; k++) {
                     EntradaLog e = registro.get(k);
-                    if (e.tipo() == EntradaLog.Tipo.VOTO) {
-                        ev("VOTO", "CONFIRMADO", e.voto().traza(), "Entrada #" + k + " CONFIRMADA: ya está en "
+                    if (e.rastreable()) {
+                        ev("VOTO", "CONFIRMADO", e.traza(), "La " + e.descripcion() + " queda CONFIRMADA: ya está en "
                                 + replicas + " de " + tamanoCluster() + " nodos (mayoría = " + mayoria() + ")", null);
                     }
                 }
@@ -460,9 +460,9 @@ public class NodoRaft {
             if (i <= ultimoIndice() && registro.get(i).termino() != entrada.termino()) truncarDesde(i);
             if (i > ultimoIndice()) {
                 registro.add(entrada);
-                if (entrada.tipo() == EntradaLog.Tipo.VOTO) {
-                    ev("REPLICACION", "ENTRADA_RECIBIDA", entrada.voto().traza(), "Recibe del líder (nodo "
-                            + s.liderId() + ") la entrada #" + i + " y la agrega a su log (aún sin confirmar)", null);
+                if (entrada.rastreable()) {
+                    ev("REPLICACION", "ENTRADA_RECIBIDA", entrada.traza(), "Recibe del líder (nodo "
+                            + s.liderId() + ") la " + entrada.descripcion() + " y la agrega a su log (aún sin confirmar)", null);
                 }
             }
         }
@@ -491,9 +491,19 @@ public class NodoRaft {
         while (ultimoAplicado < indiceConfirmado) {
             ultimoAplicado++;
             EntradaLog entrada = registro.get(ultimoAplicado);
+            if (entrada.tipo() == EntradaLog.Tipo.REINICIO) {
+                aplicarBorrado(entrada);
+                Espera espera = esperas.remove(entrada.indice());
+                if (espera != null) {
+                    if (espera.idEntrada().equals(entrada.id())) espera.futuro().complete(entrada);
+                    else espera.futuro().completeExceptionally(new VotoRechazadoException(Codigo.NO_CONFIRMADO,
+                            "La orden fue reemplazada por otro líder, intente de nuevo"));
+                }
+                continue;
+            }
             boolean aplicado = maquina.aplicar(entrada);
             if (entrada.tipo() == EntradaLog.Tipo.VOTO) {
-                String traza = entrada.voto().traza();
+                String traza = entrada.traza();
                 if (aplicado) {
                     ev("VOTO", "APLICADO", traza, "Aplica la entrada #" + entrada.indice()
                             + " al registro electoral en memoria", Evento.datos("conteo", maquina.conteo()));
@@ -522,7 +532,73 @@ public class NodoRaft {
         }
     }
 
+    /** Aplica una orden de borrado: vacía el registro en memoria y reinicia el archivo. */
+    private void aplicarBorrado(EntradaLog entrada) {
+        int votos = maquina.total();
+        maquina.reiniciar();
+        ultimosBorrados.put(entrada.indice(), votos);
+        ev("VOTO", "BORRADO", entrada.traza(), "Aplica la orden de borrado #" + entrada.indice()
+                + ": elimina " + votos + " voto(s) del registro electoral en memoria", Evento.datos("conteo", maquina.conteo()));
+        try {
+            almacen.reiniciar(entrada);
+            ev("PERSISTENCIA", "ARCHIVO_REINICIADO", entrada.traza(), "Vacía el archivo de votos del servidor",
+                    Evento.datos("archivo", almacen.archivo().toAbsolutePath(), "votosBorrados", votos));
+        } catch (IOException ex) {
+            ev("PERSISTENCIA", "ERROR_ARCHIVO", entrada.traza(), "No se pudo reiniciar el archivo: " + ex.getMessage(), null);
+        }
+    }
+
     // ================================================================== escritura de votos
+
+    /** Cuántos votos borró cada orden de borrado aplicada (índice -> votos). */
+    private final Map<Integer, Integer> ultimosBorrados = new HashMap<>();
+
+    /**
+     * Borra todos los votos. Como cualquier escritura, solo la acepta el líder: agrega
+     * una entrada REINICIO al log, la replica y espera la confirmación de la mayoría.
+     *
+     * @return [entrada confirmada, votos borrados]
+     */
+    Object[] borrarComoLider(String traza) throws NoEsLiderException, VotoRechazadoException, InterruptedException {
+        long inicio = System.nanoTime();
+        CompletableFuture<EntradaLog> futuro = new CompletableFuture<>();
+        int indice;
+        synchronized (this) {
+            if (rol != Rol.LIDER || pausado) throw new NoEsLiderException(liderId);
+            EntradaLog entrada = anexar(EntradaLog.Tipo.REINICIO, null, traza);
+            indice = entrada.indice();
+            esperas.put(indice, new Espera(entrada.id(), futuro));
+            ev("VOTO", "ANEXADO_LOG", traza, "Agrega la orden de BORRAR TODOS LOS VOTOS a su log como entrada #" + indice
+                    + " (término " + terminoActual + ") y la replica a los seguidores", Evento.datos("indice", indice));
+            avanzarConfirmacion();
+            replicarATodos();
+        }
+        EntradaLog confirmada = esperarConfirmacion(futuro, indice, traza, inicio, "la orden de borrado");
+        synchronized (this) {
+            return new Object[] {confirmada, ultimosBorrados.getOrDefault(confirmada.indice(), 0)};
+        }
+    }
+
+    private EntradaLog esperarConfirmacion(CompletableFuture<EntradaLog> futuro, int indice, String traza, long inicio,
+                                           String que) throws VotoRechazadoException, InterruptedException {
+        try {
+            EntradaLog confirmada = futuro.get(cfg.timeoutConfirmacionMs(), TimeUnit.MILLISECONDS);
+            ev("VOTO", "RESPUESTA", traza, "Responde ÉXITO a quien hizo la llamada RMI",
+                    Evento.datos("duracionMs", (System.nanoTime() - inicio) / 1_000_000));
+            return confirmada;
+        } catch (TimeoutException e) {
+            synchronized (this) {
+                esperas.remove(indice);
+            }
+            ev("VOTO", "RECHAZADO", traza, "No logró la mayoría en " + cfg.timeoutConfirmacionMs()
+                    + " ms: hay demasiados nodos caídos", null);
+            throw new VotoRechazadoException(Codigo.TIMEOUT,
+                    "No se logró replicar " + que + " en la mayoría del clúster a tiempo");
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof VotoRechazadoException v) throw v;
+            throw new IllegalStateException(e.getCause());
+        }
+    }
 
     /**
      * Registra un voto. Solo el líder acepta escrituras: agrega la entrada al log,
@@ -547,7 +623,7 @@ public class NodoRaft {
                     + " no haya votado: OK", null);
 
             Voto voto = new Voto(nombre, cedula, candidato, java.time.Instant.now().toString(), id, traza);
-            EntradaLog entrada = anexar(EntradaLog.Tipo.VOTO, voto);
+            EntradaLog entrada = anexar(EntradaLog.Tipo.VOTO, voto, traza);
             indice = entrada.indice();
             esperas.put(indice, new Espera(entrada.id(), futuro));
             ev("VOTO", "ANEXADO_LOG", traza, "Agrega el voto a su log como entrada #" + indice
@@ -556,23 +632,7 @@ public class NodoRaft {
             avanzarConfirmacion(); // en un clúster de 1 nodo se confirma de inmediato
             replicarATodos();
         }
-        try {
-            EntradaLog confirmada = futuro.get(cfg.timeoutConfirmacionMs(), TimeUnit.MILLISECONDS);
-            ev("VOTO", "RESPUESTA", traza, "Responde ÉXITO a quien hizo la llamada RMI",
-                    Evento.datos("duracionMs", (System.nanoTime() - inicio) / 1_000_000));
-            return confirmada;
-        } catch (TimeoutException e) {
-            synchronized (this) {
-                esperas.remove(indice);
-            }
-            ev("VOTO", "RECHAZADO", traza, "No logró la mayoría en " + cfg.timeoutConfirmacionMs()
-                    + " ms: hay demasiados nodos caídos", null);
-            throw new VotoRechazadoException(Codigo.TIMEOUT,
-                    "No se logró replicar el voto en la mayoría del clúster a tiempo");
-        } catch (ExecutionException e) {
-            if (e.getCause() instanceof VotoRechazadoException v) throw v;
-            throw new IllegalStateException(e.getCause());
-        }
+        return esperarConfirmacion(futuro, indice, traza, inicio, "el voto");
     }
 
     // ================================================================== trazabilidad

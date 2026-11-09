@@ -56,6 +56,7 @@ public class BitacoraUsuarios {
     private static String descripcion(Accion a) {
         return switch (a.accion()) {
             case "VOTAR" -> "El usuario " + s(a.nombre()) + " (CC " + Evento.enmascarar(a.cedula()) + ") intentó votar: " + a.resultado();
+            case "BORRAR_VOTOS" -> "El usuario ordenó BORRAR TODOS LOS VOTOS: " + a.resultado();
             case "TUMBAR_NODO", "REANUDAR_NODO" -> "El operador ejecutó " + a.accion() + " sobre el nodo " + s(a.nodo()) + ": " + a.resultado();
             default -> a.accion() + ": " + a.resultado();
         };

@@ -45,6 +45,15 @@ class AlmacenVotos {
         return archivo;
     }
 
+    /** Orden de borrado confirmada: deja el archivo solo con la cabecera y una marca del borrado. */
+    synchronized void reiniciar(EntradaLog orden) throws IOException {
+        Files.writeString(archivo, "# Votos confirmados del nodo " + nodoId + System.lineSeparator()
+                + "# Votos borrados el " + Instant.now() + " por la orden #" + orden.indice() + " (término "
+                + orden.termino() + ", traza " + orden.traza() + ")" + System.lineSeparator()
+                + CABECERA + System.lineSeparator(), StandardCharsets.UTF_8);
+        lineas = 0;
+    }
+
     /** Agrega una línea al archivo y retorna el número de registro escrito. */
     synchronized int guardar(EntradaLog entrada) throws IOException {
         Voto v = entrada.voto();
