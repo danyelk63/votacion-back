@@ -1,4 +1,3 @@
-# ---- 1. Compilación ----
 FROM maven:3.9-eclipse-temurin-21 AS compilacion
 WORKDIR /src
 COPY pom.xml .
@@ -6,7 +5,6 @@ RUN mvn -q -B dependency:go-offline
 COPY src ./src
 RUN mvn -q -B package -DskipTests
 
-# ---- 2. Ejecución: JRE + nginx ----
 FROM eclipse-temurin:21-jre-jammy
 RUN apt-get update \
  && apt-get install -y --no-install-recommends nginx \

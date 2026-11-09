@@ -1,6 +1,3 @@
-# Render expone un único puerto público ($PORT). nginx lo reparte:
-#   /ws  -> WebSocket del gateway (8081)
-#   /    -> API REST del gateway (8080)
 worker_processes 1;
 pid /tmp/nginx.pid;
 error_log /dev/stderr warn;

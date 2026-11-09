@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Levanta 3 nodos (procesos JVM independientes) + el gateway.
-# Uso: ./scripts/cluster.sh     (Ctrl+C detiene todo)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 final class Validacion {
-
     private static final Pattern NOMBRE = Pattern.compile("^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ' ]{3,100}$");
     private static final Pattern CEDULA = Pattern.compile("^\\d{6,10}$");
 
@@ -18,7 +17,6 @@ final class Validacion {
     record Resultado(List<String> errores, String nombre, String cedula, String candidato) {
     }
 
-    /** Valida y normaliza (quita espacios extra y puntos de la cédula). */
     static Resultado validar(SolicitudRegistro s) {
         String nombre = s.nombre() == null ? "" : s.nombre().trim().replaceAll("\\s+", " ");
         String cedula = s.cedula() == null ? "" : s.cedula().replaceAll("[.\\s]", "");

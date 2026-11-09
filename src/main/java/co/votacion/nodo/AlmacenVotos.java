@@ -13,16 +13,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
 
-/**
- * Almacenamiento de los votos confirmados en un <b>archivo de texto</b> dentro del
- * propio nodo ({@code datos/nodo-N/votos.txt}). No hay base de datos.
- *
- * <p>Cada nodo escribe su propia copia, así que el archivo queda replicado en
- * todos los servidores. Al arrancar se reinicia: el nodo vuelve a recibir del
- * líder todas las entradas confirmadas y reconstruye el archivo.
- */
 class AlmacenVotos {
-
     static final String CABECERA = "# fecha_guardado | indice_log | termino | cedula | nombre | candidato | nodo_lider | traza";
 
     private final int nodoId;
@@ -45,8 +36,6 @@ class AlmacenVotos {
         return archivo;
     }
 
-    /** Orden de borrado confirmada: deja el archivo solo con la cabecera y una marca del borrado. */
-    /** Reinicio total: el archivo queda como recién creado. */
     synchronized void reiniciarDesdeCero() throws IOException {
         Files.writeString(archivo, "# Votos confirmados del nodo " + nodoId + " (reiniciado " + Instant.now() + ")"
                 + System.lineSeparator() + CABECERA + System.lineSeparator(), StandardCharsets.UTF_8);
@@ -61,7 +50,6 @@ class AlmacenVotos {
         lineas = 0;
     }
 
-    /** Agrega una línea al archivo y retorna el número de registro escrito. */
     synchronized int guardar(EntradaLog entrada) throws IOException {
         Voto v = entrada.voto();
         String linea = String.join(" | ", Instant.now().toString(), String.valueOf(entrada.indice()),

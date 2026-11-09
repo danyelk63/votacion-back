@@ -39,13 +39,8 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Pruebas de integración: 3 nodos y el gateway en la misma JVM, cada uno con su
- * propio RMI Registry en un puerto distinto. La comunicación es RMI real por TCP.
- */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ClusterTest {
-
     private static final int BASE = 15100;
     private static final String GW = "http://localhost:" + BASE;
     private static final ConfigRaft RAPIDO = new ConfigRaft(50, 250, 500, 2000);
@@ -78,8 +73,6 @@ class ClusterTest {
         gateway.detener();
         nodos.forEach(ServidorNodo::detener);
     }
-
-    // ------------------------------------------------------------------ utilidades
 
     record Http(int status, Map<String, Object> cuerpo) {
     }
@@ -132,8 +125,6 @@ class ClusterTest {
     static int votosEn(int id) {
         return raft(id).leer(m -> m.total());
     }
-
-    // ------------------------------------------------------------------ pruebas
 
     @Test
     @Order(1)
@@ -191,7 +182,6 @@ class ClusterTest {
         assertEquals(nuevo.id(), r.cuerpo().get("lider"));
         assertEquals(1, votosEn(viejo.id()), "el nodo caído no recibe el voto nuevo");
 
-        // Al volver, el nodo se pone al día y reconoce al nuevo líder.
         api("POST", "/api/cluster/" + viejo.id() + "/reanudar", null);
         esperarHasta(() -> votosEn(viejo.id()) == 2 && viejo.rol() == NodoRaft.Rol.SEGUIDOR, "nodo recuperado");
         esperarHasta(() -> new HashSet<>(nodos.stream().map(n -> n.raft().idsConfirmados()).toList()).size() == 1,
@@ -240,7 +230,7 @@ class ClusterTest {
     @Order(8)
     void cadaVotoEsTrazableDeExtremoAExtremoYQuedaEnLosArchivos() throws Exception {
         esperarLider(null);
-        // Cliente WebSocket como el del navegador
+
         List<String> mensajes = new CopyOnWriteArrayList<>();
         WebSocket ws = http.newWebSocketBuilder().buildAsync(URI.create("ws://localhost:" + (BASE + 10)),
                 new WebSocket.Listener() {
@@ -266,7 +256,6 @@ class ClusterTest {
         String traza = (String) r.cuerpo().get("traza");
         assertNotNull(traza);
 
-        // Todas las etapas, desde el HTTP hasta el archivo en los 3 nodos.
         esperarHasta(() -> gateway.central().historial().stream()
                 .filter(e -> traza.equals(e.traza()) && "GUARDADO_ARCHIVO".equals(e.etapa())).count() == 3, "3 archivos");
         esperarHasta(() -> gateway.central().historial().stream()
@@ -299,7 +288,7 @@ class ClusterTest {
     void borrarVotosLosEliminaDeTodosLosNodosYDeSusArchivosPorConsenso() throws Exception {
         esperarLider(null);
         assertEquals(200, api("POST", "/api/votos", voto("Elena Paz", "41222333", "C2")).status());
-        // los seguidores aplican el voto en el siguiente latido: esperar a que los 3 coincidan
+
         esperarHasta(() -> votosEn(1) == votosEn(2) && votosEn(2) == votosEn(3) && votosEn(1) == esperarLiderSinError().leer(m -> m.total()),
                 "los 3 nodos con el mismo conteo");
         int antes = votosEn(1);
@@ -321,7 +310,6 @@ class ClusterTest {
         assertTrue(Files.readAllLines(datos.resolve("gateway").resolve("usuarios.log")).stream()
                 .anyMatch(l -> l.contains("BORRAR_VOTOS") && l.contains(traza)));
 
-        // Tras el borrado, la misma cédula puede volver a votar
         assertEquals(200, api("POST", "/api/votos", voto("Elena Paz", "41222333", "C1")).status());
         esperarHasta(() -> votosEn(1) == 1 && votosEn(2) == 1 && votosEn(3) == 1, "nuevo voto replicado");
     }
@@ -332,7 +320,7 @@ class ClusterTest {
         esperarLider(null);
         assertEquals(200, api("POST", "/api/votos", voto("Mario Luna", "71555666", "C2")).status());
         esperarHasta(() -> votosEn(1) >= 1 && votosEn(2) >= 1 && votosEn(3) >= 1, "voto replicado");
-        raft(2).pausar(); // un nodo "tumbado" también se reinicia
+        raft(2).pausar();
 
         Http r = api("POST", "/api/reiniciar", null);
         assertEquals(200, r.status(), r.cuerpo().toString());
@@ -352,7 +340,6 @@ class ClusterTest {
         }
         assertTrue(Files.readAllLines(datos.resolve("gateway").resolve("usuarios.log")).stream().allMatch(l -> l.startsWith("#")));
 
-        // y el sistema sigue funcionando: la misma cédula puede votar de nuevo
         assertEquals(200, api("POST", "/api/votos", voto("Mario Luna", "71555666", "C2")).status());
         esperarHasta(() -> votosEn(1) == 1 && votosEn(2) == 1 && votosEn(3) == 1, "nuevo voto replicado");
     }

@@ -18,13 +18,13 @@
   </properties>
 
   <dependencies>
-    <!-- Solo el gateway la usa para serializar JSON hacia el frontend -->
+
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
       <version>${jackson.version}</version>
     </dependency>
-    <!-- Servidor WebSocket del gateway: empuja los eventos al navegador en tiempo real -->
+
     <dependency>
       <groupId>org.java-websocket</groupId>
       <artifactId>Java-WebSocket</artifactId>
@@ -52,7 +52,7 @@
         <version>3.5.2</version>
       </plugin>
       <plugin>
-        <!-- Genera target/votacion.jar ejecutable con todas las dependencias -->
+
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
         <version>3.6.0</version>

@@ -4,13 +4,7 @@ import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 
-/**
- * Referencia perezosa al stub RMI de un nodo remoto. Hace el lookup en el
- * Registry la primera vez y, si una llamada falla, lo descarta para volver a
- * buscarlo (el nodo pudo reiniciarse y publicar un objeto remoto nuevo).
- */
 public class ClienteRmi {
-
     @FunctionalInterface
     public interface Llamada<T> {
         T ejecutar(NodoVotacion nodo) throws Exception;
@@ -45,7 +39,6 @@ public class ClienteRmi {
         return s;
     }
 
-    /** Ejecuta una llamada remota; ante un error de comunicación descarta el stub. */
     public <T> T llamar(Llamada<T> llamada) throws Exception {
         try {
             return llamada.ejecutar(stub());
@@ -55,7 +48,6 @@ public class ClienteRmi {
         }
     }
 
-    /** Ajusta los timeouts de RMI para detectar rápido nodos caídos. Llamar antes de usar RMI. */
     public static void configurarTimeouts(int conexionMs, int respuestaMs) {
         System.setProperty("sun.rmi.transport.connectionTimeout", String.valueOf(conexionMs));
         System.setProperty("sun.rmi.transport.tcp.handshakeTimeout", String.valueOf(conexionMs));

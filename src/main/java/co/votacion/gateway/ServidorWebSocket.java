@@ -11,17 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
-/**
- * Servidor WebSocket: empuja los eventos al navegador en tiempo real.
- *
- * <p>Mensajes que envía (JSON):
- * <ul>
- *   <li>{@code {"tipo":"historial","eventos":[...]}} al conectarse.</li>
- *   <li>{@code {"tipo":"evento","evento":{...}}} por cada evento nuevo.</li>
- * </ul>
- */
 public class ServidorWebSocket extends WebSocketServer {
-
     private final CentralEventos central;
     private final ObjectMapper json;
     private final Consumer<Evento> difusor = this::difundir;
@@ -39,7 +29,7 @@ public class ServidorWebSocket extends WebSocketServer {
     @Override
     public void onStart() {
         central.suscribir(difusor);
-        // "Vaciar todo": los navegadores conectados limpian sus listas de eventos.
+
         central.alVaciar(() -> broadcast("{\"tipo\":\"reinicio\"}"));
         log.accept("WebSocket de eventos escuchando en ws://localhost:" + getPort());
     }

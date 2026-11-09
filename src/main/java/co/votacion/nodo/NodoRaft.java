@@ -35,32 +35,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Implementación didáctica del algoritmo de consenso Raft
- * (Ongaro y Ousterhout, "In Search of an Understandable Consensus Algorithm", 2014),
- * usando Java RMI como transporte entre nodos.
- *
- * <p>Cubre:
- * <ul>
- *   <li>Elección de líder con timeouts aleatorios y términos ({@code solicitarVoto}).</li>
- *   <li>Replicación del log desde el líder ({@code anexarEntradas}) con verificación de consistencia.</li>
- *   <li>Confirmación (commit) por mayoría y aplicación ordenada a la máquina de estados.</li>
- *   <li>Restricción de elección: solo gana un candidato con el log al menos tan actualizado.</li>
- *   <li>Entrada "noop" al asumir el liderazgo para confirmar entradas de términos anteriores.</li>
- * </ul>
- *
- * <p>Simplificaciones (ejercicio académico, sin base de datos): el estado vive en
- * memoria (un nodo reiniciado vuelve vacío y el líder le reenvía todo el log) y la
- * membresía del clúster es fija.
- *
- * <p>Concurrencia: todo el estado se protege con el monitor de {@code this}; las
- * llamadas RMI a otros nodos se hacen SIN tener el candado, en un pool de hilos.
- */
 public class NodoRaft {
-
     public enum Rol { SEGUIDOR, CANDIDATO, LIDER }
 
-    /** Señal interna: la petición llegó a un nodo que no es líder. */
     static class NoEsLiderException extends Exception {
         final Integer liderId;
 
@@ -82,19 +59,16 @@ public class NodoRaft {
     private final AlmacenVotos almacen;
     private final Set<Integer> paresInaccesibles = ConcurrentHashMap.newKeySet();
 
-    // Estado "persistente" de Raft (en memoria)
     private long terminoActual = 0;
     private Integer votoPara = null;
     private final List<EntradaLog> registro = new ArrayList<>(List.of(EntradaLog.centinela()));
 
-    // Estado volátil
     private int indiceConfirmado = 0;
     private int ultimoAplicado = 0;
     private Rol rol = Rol.SEGUIDOR;
     private Integer liderId = null;
     private volatile boolean pausado = false;
 
-    // Estado del líder
     private final Map<Integer, Integer> siguienteIndice = new HashMap<>();
     private final Map<Integer, Integer> indiceCoincidente = new HashMap<>();
     private final Set<Integer> enVuelo = ConcurrentHashMap.newKeySet();
@@ -107,10 +81,6 @@ public class NodoRaft {
     private ScheduledFuture<?> temporizadorEleccion;
     private ScheduledFuture<?> temporizadorLatido;
 
-    /**
-     * @param dirDatos carpeta donde el nodo escribe sus archivos (votos.txt y eventos.log)
-     * @param consola  si imprime los eventos en la salida estándar
-     */
     public NodoRaft(int id, List<ClienteRmi> pares, ConfigRaft cfg, Path dirDatos, boolean consola) {
         this.id = id;
         pares.forEach(p -> this.pares.put(p.id(), p));
@@ -120,8 +90,6 @@ public class NodoRaft {
         this.planificador = Executors.newSingleThreadScheduledExecutor(hilo("raft-" + id + "-timer"));
         this.rpcs = Executors.newCachedThreadPool(hilo("raft-" + id + "-rpc"));
     }
-
-    // ================================================================== ciclo de vida
 
     public synchronized void iniciar() {
         ev("SISTEMA", "INICIO", null, "Nodo iniciado como SEGUIDOR en un clúster de " + tamanoCluster() + " nodos",
@@ -137,7 +105,6 @@ public class NodoRaft {
         bitacora.detener();
     }
 
-    /** Simula una caída / partición de red: el nodo deja de participar. */
     public synchronized void pausar() {
         pausado = true;
         cancelar(temporizadorEleccion);
@@ -148,8 +115,7 @@ public class NodoRaft {
     public synchronized void reanudar() {
         if (!pausado) return;
         pausado = false;
-        // Si era líder, sigue enviando latidos; si ya hay otro líder con término mayor,
-        // la primera respuesta lo hará retroceder a seguidor.
+
         if (rol == Rol.LIDER) iniciarLatidos();
         else reiniciarTemporizadorEleccion();
         ev("SISTEMA", "REANUDADO", null, "Nodo REANUDADO: vuelve a participar en el clúster", null);
@@ -162,8 +128,6 @@ public class NodoRaft {
     public int id() {
         return id;
     }
-
-    // ================================================================== consultas
 
     synchronized int tamanoCluster() {
         return pares.size() + 1;
@@ -197,12 +161,10 @@ public class NodoRaft {
         return pares.get(idPar);
     }
 
-    /** Lectura del estado de la máquina bajo el candado. */
     public synchronized <T> T leer(java.util.function.Function<RegistroVotos, T> lectura) {
         return lectura.apply(maquina);
     }
 
-    /** Ids de las entradas confirmadas, en orden (para pruebas). */
     public synchronized List<String> idsConfirmados() {
         return registro.subList(1, indiceConfirmado + 1).stream().map(EntradaLog::id).toList();
     }
@@ -216,8 +178,6 @@ public class NodoRaft {
         return new EstadoNodo(id, rol.name(), terminoActual, liderId, votoPara, pausado, ultimoIndice(),
                 indiceConfirmado, ultimoAplicado, maquina.total(), replicacion);
     }
-
-    // ================================================================== elección de líder
 
     private void reiniciarTemporizadorEleccion() {
         cancelar(temporizadorEleccion);
@@ -235,9 +195,9 @@ public class NodoRaft {
         final long termino = terminoActual;
         ev("ELECCION", "CANDIDATURA", null, "No recibió latidos del líder a tiempo: se postula como CANDIDATO y pide votos por RMI (solicitarVoto)",
                 Evento.datos("termino", termino, "mayoriaNecesaria", mayoria()));
-        reiniciarTemporizadorEleccion(); // si nadie gana (voto dividido), se reintenta
+        reiniciarTemporizadorEleccion();
 
-        AtomicInteger votos = new AtomicInteger(1); // su propio voto
+        AtomicInteger votos = new AtomicInteger(1);
         if (votos.get() >= mayoria()) {
             convertirseEnLider();
             return;
@@ -264,7 +224,6 @@ public class NodoRaft {
                         }
                     }
                 } catch (Exception e) {
-                    // par inaccesible: no vota
                 }
             });
         }
@@ -280,7 +239,7 @@ public class NodoRaft {
             indiceCoincidente.put(p, 0);
         }
         ev("ELECCION", "NUEVO_LIDER", null, "Ganó la elección: ahora es el LÍDER del término " + terminoActual, null);
-        // Entrada noop: permite confirmar entradas de términos anteriores (§5.4.2 del paper).
+
         anexar(EntradaLog.Tipo.NOOP, null, null);
         avanzarConfirmacion();
         iniciarLatidos();
@@ -307,7 +266,6 @@ public class NodoRaft {
         reiniciarTemporizadorEleccion();
     }
 
-    /** RPC RequestVote, lado receptor. */
     public synchronized RespuestaVoto alSolicitarVoto(SolicitudVoto s) {
         if (s.termino() > terminoActual) retrocederASeguidor(s.termino(), null);
 
@@ -329,8 +287,6 @@ public class NodoRaft {
         return new RespuestaVoto(terminoActual, conceder);
     }
 
-    // ================================================================== replicación del log
-
     private EntradaLog anexar(EntradaLog.Tipo tipo, Voto voto, String traza) {
         EntradaLog e = new EntradaLog(ultimoIndice() + 1, terminoActual, UUID.randomUUID().toString(), tipo, voto, traza);
         registro.add(e);
@@ -342,9 +298,8 @@ public class NodoRaft {
         pares.values().forEach(this::replicarA);
     }
 
-    /** Envía a un seguidor las entradas que le faltan (o un latido vacío). Se llama con el candado. */
     private void replicarA(ClienteRmi par) {
-        if (!enVuelo.add(par.id())) return; // ya hay una llamada en curso a ese par
+        if (!enVuelo.add(par.id())) return;
         final long termino = terminoActual;
         final int siguiente = siguienteIndice.get(par.id());
         final int previo = siguiente - 1;
@@ -385,7 +340,6 @@ public class NodoRaft {
                         siguienteIndice.put(par.id(), indiceCoincidente.get(par.id()) + 1);
                         avanzarConfirmacion();
                     } else {
-                        // Inconsistencia: retroceder hasta encontrar el punto en común con el seguidor.
                         siguienteIndice.put(par.id(), Math.max(1, Math.min(r.indiceConflicto(), previo)));
                         ev("REPLICACION", "INCONSISTENCIA", null, "El log del nodo " + par.id()
                                 + " no coincide en el índice " + previo + ": se reintentará desde el "
@@ -394,7 +348,6 @@ public class NodoRaft {
                     pendiente = siguienteIndice.get(par.id()) <= ultimoIndice();
                 }
             } catch (Exception e) {
-                // par caído o pausado: se reintenta en el próximo latido
                 if (paresInaccesibles.add(par.id())) {
                     ev("RED", "PAR_CAIDO", null, "El nodo " + par.id() + " no responde a las llamadas RMI (caído o pausado)",
                             Evento.datos("error", e.getClass().getSimpleName()));
@@ -404,13 +357,12 @@ public class NodoRaft {
             }
             if (pendiente) {
                 synchronized (this) {
-                    if (rol == Rol.LIDER && !pausado) replicarA(par); // ponerlo al día sin esperar el latido
+                    if (rol == Rol.LIDER && !pausado) replicarA(par);
                 }
             }
         });
     }
 
-    /** El líder confirma la entrada N si está replicada en la mayoría y es de su término. */
     private void avanzarConfirmacion() {
         for (int n = ultimoIndice(); n > indiceConfirmado; n--) {
             if (registro.get(n).termino() != terminoActual) break;
@@ -432,7 +384,6 @@ public class NodoRaft {
         }
     }
 
-    /** RPC AppendEntries, lado receptor. También funciona como latido del líder. */
     public synchronized RespuestaAnexar alAnexarEntradas(SolicitudAnexar s) {
         if (s.termino() < terminoActual) return new RespuestaAnexar(terminoActual, false, 0, 0);
 
@@ -443,12 +394,10 @@ public class NodoRaft {
         liderId = s.liderId();
         reiniciarTemporizadorEleccion();
 
-        // Verificación de consistencia del log
         if (s.indiceLogPrevio() > ultimoIndice()) {
             return new RespuestaAnexar(terminoActual, false, 0, ultimoIndice() + 1);
         }
         if (registro.get(s.indiceLogPrevio()).termino() != s.terminoLogPrevio()) {
-            // Saltar todo el término en conflicto para retroceder más rápido.
             long terminoConflicto = registro.get(s.indiceLogPrevio()).termino();
             int i = s.indiceLogPrevio();
             while (i > 1 && registro.get(i - 1).termino() == terminoConflicto) i--;
@@ -532,7 +481,6 @@ public class NodoRaft {
         }
     }
 
-    /** Aplica una orden de borrado: vacía el registro en memoria y reinicia el archivo. */
     private void aplicarBorrado(EntradaLog entrada) {
         int votos = maquina.total();
         maquina.reiniciar();
@@ -548,17 +496,8 @@ public class NodoRaft {
         }
     }
 
-    // ================================================================== escritura de votos
-
-    /** Cuántos votos borró cada orden de borrado aplicada (índice -> votos). */
     private final Map<Integer, Integer> ultimosBorrados = new HashMap<>();
 
-    /**
-     * Borra todos los votos. Como cualquier escritura, solo la acepta el líder: agrega
-     * una entrada REINICIO al log, la replica y espera la confirmación de la mayoría.
-     *
-     * @return [entrada confirmada, votos borrados]
-     */
     Object[] borrarComoLider(String traza) throws NoEsLiderException, VotoRechazadoException, InterruptedException {
         long inicio = System.nanoTime();
         CompletableFuture<EntradaLog> futuro = new CompletableFuture<>();
@@ -600,10 +539,6 @@ public class NodoRaft {
         }
     }
 
-    /**
-     * Registra un voto. Solo el líder acepta escrituras: agrega la entrada al log,
-     * la replica y espera a que la mayoría la confirme.
-     */
     EntradaLog registrarComoLider(String nombre, String cedula, String candidato, String traza)
             throws NoEsLiderException, VotoRechazadoException, InterruptedException {
         long inicio = System.nanoTime();
@@ -629,15 +564,12 @@ public class NodoRaft {
             ev("VOTO", "ANEXADO_LOG", traza, "Agrega el voto a su log como entrada #" + indice
                     + " (término " + terminoActual + ") y lo replica a los seguidores",
                     Evento.datos("indice", indice, "candidato", candidato));
-            avanzarConfirmacion(); // en un clúster de 1 nodo se confirma de inmediato
+            avanzarConfirmacion();
             replicarATodos();
         }
         return esperarConfirmacion(futuro, indice, traza, inicio, "el voto");
     }
 
-    // ================================================================== trazabilidad
-
-    /** Emite un evento con el rol y término actuales del nodo. */
     synchronized void ev(String categoria, String etapa, String traza, String mensaje, java.util.Map<String, String> datos) {
         bitacora.publicar(Evento.nuevo("NODO", id, rol.name(), terminoActual, categoria, etapa, traza, mensaje, datos));
     }
@@ -648,11 +580,6 @@ public class NodoRaft {
         }
     }
 
-    /**
-     * Reinicio TOTAL del nodo, como recién encendido: log de Raft vacío, término 0,
-     * sin votos, archivos votos.txt y eventos.log en blanco. Lo usa el botón
-     * "Vaciar todo" (el gateway pausa todos los nodos, los reinicia y los reanuda).
-     */
     synchronized void reiniciarTodo() {
         cancelar(temporizadorEleccion);
         cancelar(temporizadorLatido);
@@ -684,8 +611,6 @@ public class NodoRaft {
     ArchivoNodo leerArchivo() {
         return almacen.leer(200);
     }
-
-    // ================================================================== utilidades
 
     private static void cancelar(ScheduledFuture<?> f) {
         if (f != null) f.cancel(false);

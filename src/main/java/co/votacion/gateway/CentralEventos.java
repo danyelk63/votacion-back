@@ -14,14 +14,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
-/**
- * Concentra todos los eventos del sistema (los que llegan de los nodos por
- * callback RMI y los que genera el propio gateway): les asigna un número de
- * secuencia global, guarda un historial y los reparte a los suscriptores
- * (el servidor WebSocket).
- */
 public class CentralEventos {
-
     private static final int MAX_HISTORIAL = 5000;
 
     private final Deque<Evento> historial = new ArrayDeque<>();
@@ -56,12 +49,10 @@ public class CentralEventos {
         return numerado;
     }
 
-    /** Evento generado por el gateway. */
     public Evento gateway(String categoria, String etapa, String traza, String mensaje, java.util.Map<String, String> datos) {
         return publicar(Evento.nuevo("GATEWAY", null, "GATEWAY", null, categoria, etapa, traza, mensaje, datos));
     }
 
-    /** Borra todo el historial y el archivo eventos.log, y avisa a los suscriptores. */
     public synchronized void vaciar() {
         historial.clear();
         secuencia = 0;
@@ -80,7 +71,6 @@ public class CentralEventos {
         return new ArrayList<>(historial);
     }
 
-    /** Suscribe y devuelve el historial de forma atómica (sin perder ni duplicar eventos). */
     public synchronized List<Evento> suscribir(Consumer<Evento> s) {
         suscriptores.add(s);
         return new ArrayList<>(historial);

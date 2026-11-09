@@ -1,5 +1,4 @@
 @echo off
-REM Levanta 3 nodos + gateway en ventanas separadas (Windows).
 cd /d "%~dp0\.."
 if not exist target\votacion.jar call mvn -q -B package -DskipTests
 

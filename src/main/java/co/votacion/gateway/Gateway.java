@@ -36,36 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * API Gateway: puente entre el navegador y el clúster.
- *
- * <p>El navegador no puede hacer llamadas RMI, así que:
- * <ul>
- *   <li>Recibe <b>HTTP/REST</b> del frontend y actúa como <b>cliente RMI</b> de los nodos
- *       (balanceo round-robin + failover).</li>
- *   <li>Exporta un objeto de <b>callback RMI</b> ({@link ReceptorEventos}) al que los nodos
- *       le envían cada evento que generan.</li>
- *   <li>Reenvía todos esos eventos al navegador en tiempo real por <b>WebSocket</b>.</li>
- *   <li>Lleva el log de auditoría de usuarios en {@code datos/gateway/usuarios.log}.</li>
- * </ul>
- *
- * <pre>
- * GET  /api/candidatos
- * GET  /api/resultados
- * GET  /api/votos
- * POST /api/votos                  {"nombre","cedula","candidato"}
- * DELETE /api/votos                borra todos los votos (por consenso en todo el clúster)
- * GET  /api/cluster
- * POST /api/cluster/{id}/pausar
- * POST /api/cluster/{id}/reanudar
- * POST /api/reiniciar              VACIAR TODO: votos, logs y archivos; nueva elección desde término 0
- * GET  /api/eventos                historial de eventos (también llega por WebSocket)
- * GET  /api/archivos               contenido de votos.txt de cada nodo y de usuarios.log
- * WS   ws://host:puertoWs          eventos en tiempo real
- * </pre>
- */
 public class Gateway {
-
     private static final Pattern RUTA_ADMIN = Pattern.compile("^/api/cluster/(\\d+)/(pausar|reanudar)$");
 
     private final int puerto;
@@ -86,17 +57,14 @@ public class Gateway {
     private ExecutorService hilosHttp;
     private ScheduledExecutorService suscripciones;
 
-    /** Respuesta HTTP a devolver. */
     private record Respuesta(int status, Object cuerpo) {
     }
 
-    /** Llamada RMI a un nodo concreto. */
     @FunctionalInterface
     private interface Operacion {
         Object ejecutar(ClienteRmi nodo) throws Exception;
     }
 
-    /** Resultado de una operación con failover: respuesta + nodo que la atendió. */
     private record ResultadoFailover(Respuesta respuesta, Integer nodo, VotoRechazadoException rechazo) {
     }
 
@@ -114,16 +82,13 @@ public class Gateway {
         central = new CentralEventos(dirDatos.resolve("eventos.log"), !silencioso);
         usuarios = new BitacoraUsuarios(dirDatos.resolve("usuarios.log"), central);
 
-        // 1. Objeto remoto de callback para que los nodos nos envíen sus eventos.
         receptor = new ReceptorEventos(central, puertoCallback);
         central.gateway("SISTEMA", "CALLBACK_RMI", null, "Objeto remoto de callback exportado: los nodos invocarán recibir() en él",
                 Evento.datos("puerto", puertoCallback));
 
-        // 2. WebSocket hacia el navegador.
         webSocket = new ServidorWebSocket(puertoWs, central, json, this::log);
         webSocket.start();
 
-        // 3. API REST.
         servidor = HttpServer.create(new InetSocketAddress(puerto), 0);
         hilosHttp = Executors.newFixedThreadPool(16);
         servidor.setExecutor(hilosHttp);
@@ -132,7 +97,6 @@ public class Gateway {
         central.gateway("SISTEMA", "INICIO", null, "Gateway escuchando HTTP en el puerto " + puerto
                 + " y WebSocket en el " + puertoWs, Evento.datos("nodos", nodos.stream().map(n -> n.direccion().toString()).toList()));
 
-        // 4. Suscribirse a cada nodo (y re-suscribirse si un nodo se reinicia).
         suscripciones = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "gateway-suscripciones");
             t.setDaemon(true);
@@ -149,7 +113,6 @@ public class Gateway {
                     return null;
                 });
             } catch (Exception ignorada) {
-                // nodo caído: se reintenta en 2 s
             }
         }
     }
@@ -168,8 +131,6 @@ public class Gateway {
         } catch (Exception ignorada) {
         }
     }
-
-    // ================================================================== enrutamiento
 
     private void atender(HttpExchange ex) throws IOException {
         try (ex) {
@@ -214,8 +175,6 @@ public class Gateway {
             enviar(ex, new Respuesta(500, Map.of("error", "Error interno del gateway")));
         }
     }
-
-    // ================================================================== votos
 
     private Respuesta registrarVoto(HttpExchange ex) throws IOException {
         long inicio = System.nanoTime();
@@ -275,7 +234,6 @@ public class Gateway {
         return r;
     }
 
-    /** Borra todos los votos: la orden se replica por Raft a todos los nodos. */
     private Respuesta borrarVotos(HttpExchange ex) {
         long inicio = System.nanoTime();
         String traza = UUID.randomUUID().toString().substring(0, 8);
@@ -318,10 +276,6 @@ public class Gateway {
         return r;
     }
 
-    /**
-     * Ejecuta la operación en los nodos, en orden round-robin, hasta obtener una
-     * respuesta definitiva. Un nodo caído (RemoteException) o sin líder => siguiente nodo.
-     */
     private ResultadoFailover conFailover(Operacion op, String traza) {
         int inicio = Math.floorMod(turno.getAndIncrement(), nodos.size());
         List<String> intentos = new ArrayList<>();
@@ -344,7 +298,7 @@ public class Gateway {
                             + " no responde por RMI (" + e.getClass().getSimpleName() + "): prueba con el siguiente nodo", null);
                 }
             }
-            // Probablemente hay una elección de líder en curso: esperar antes de otra ronda.
+
             if (ronda < 2) dormir(1000);
         }
         return new ResultadoFailover(new Respuesta(503, Map.of("error", "El clúster no está disponible en este momento",
@@ -365,9 +319,6 @@ public class Gateway {
         return new Respuesta(status, cuerpo);
     }
 
-    // ================================================================== clúster y archivos
-
-    /** Consulta en paralelo el estado de todos los nodos (panel de monitoreo). */
     private Respuesta estadoCluster() {
         List<CompletableFuture<Map<String, Object>>> consultas = nodos.stream()
                 .map(n -> CompletableFuture.supplyAsync(() -> {
@@ -397,7 +348,6 @@ public class Gateway {
         return new Respuesta(200, cuerpo);
     }
 
-    /** Lee por RMI el archivo votos.txt de cada nodo, más el usuarios.log del gateway. */
     private Respuesta archivos() {
         List<CompletableFuture<Map<String, Object>>> lecturas = nodos.stream()
                 .map(n -> CompletableFuture.supplyAsync(() -> {
@@ -419,12 +369,6 @@ public class Gateway {
         return new Respuesta(200, cuerpo);
     }
 
-    /**
-     * Vaciar todo para volver a empezar la demostración desde cero. Exige que los 3
-     * procesos respondan: un nodo apagado volvería con su estado viejo.
-     * Pasos: pausar todos -> reiniciar cada uno -> vaciar logs del gateway -> reanudar todos
-     * (y los nodos eligen un líder nuevo desde el término 0).
-     */
     private synchronized Respuesta vaciarTodo() throws IOException {
         List<Integer> sinRespuesta = new ArrayList<>();
         for (ClienteRmi n : nodos) {
@@ -470,8 +414,6 @@ public class Gateway {
         }
     }
 
-    // ================================================================== utilidades
-
     @SuppressWarnings("unchecked")
     private Object conNodo(Object resultado, int nodoId) {
         Map<String, Object> m = new LinkedHashMap<>(json.convertValue(resultado, Map.class));
@@ -494,7 +436,6 @@ public class Gateway {
         ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
     }
 
-    /** Resume el User-Agent a algo legible ("Chrome", "Firefox"...). */
     private static String navegador(String ua) {
         if (ua == null) return "desconocido";
         if (ua.contains("Edg/")) return "Edge";

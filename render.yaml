@@ -1,4 +1,3 @@
-# Blueprint de Render: un servicio web gratuito con Docker.
 services:
   - type: web
     name: votacion-back

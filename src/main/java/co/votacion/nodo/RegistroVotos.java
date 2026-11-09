@@ -12,14 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Máquina de estados replicada: el "registro electoral" en memoria (sin base de datos).
- *
- * <p>Cada nodo aplica las MISMAS entradas confirmadas del log en el MISMO orden,
- * así que todos llegan al mismo estado. Por eso {@link #aplicar} debe ser determinista.
- */
 public class RegistroVotos {
-
     record Registro(Voto voto, int indiceLog) {
     }
 
@@ -45,7 +38,6 @@ public class RegistroVotos {
         return enOrden.size();
     }
 
-    /** @return true si se aplicó; false si la cédula ya había votado (todos los nodos lo rechazan igual). */
     boolean aplicar(EntradaLog entrada) {
         if (entrada.tipo() != EntradaLog.Tipo.VOTO) return true;
         Voto voto = entrada.voto();
@@ -75,7 +67,6 @@ public class RegistroVotos {
                 r.voto().candidato(), r.voto().registradoEn(), r.voto().recibidoPorNodo(), r.indiceLog())).toList();
     }
 
-    /** Cédulas en el orden en que se aplicaron (útil para verificar que todos los nodos coinciden). */
     public List<String> cedulasEnOrden() {
         return enOrden.stream().map(r -> r.voto().cedula()).toList();
     }

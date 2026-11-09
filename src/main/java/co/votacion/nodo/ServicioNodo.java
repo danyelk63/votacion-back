@@ -24,13 +24,7 @@ import co.votacion.comun.VotoRechazadoException.Codigo;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 
-/**
- * Objeto remoto RMI del nodo. Extiende {@link UnicastRemoteObject}, así que al
- * construirse queda exportado (escuchando llamadas remotas) en el puerto indicado.
- * Delega la lógica distribuida en {@link NodoRaft}.
- */
 public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
-
     private final transient NodoRaft raft;
 
     public ServicioNodo(NodoRaft raft, int puerto) throws RemoteException {
@@ -41,8 +35,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
     private void verificarDisponible() throws NodoNoDisponibleException {
         if (raft.estaPausado()) throw new NodoNoDisponibleException(raft.id());
     }
-
-    // ------------------------------------------------------------ Raft
 
     @Override
     public RespuestaVoto solicitarVoto(SolicitudVoto solicitud) throws RemoteException {
@@ -55,8 +47,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
         verificarDisponible();
         return raft.alAnexarEntradas(solicitud);
     }
-
-    // ------------------------------------------------------------ API
 
     @Override
     public ResultadoRegistro registrarVoto(SolicitudRegistro s) throws RemoteException, VotoRechazadoException {
@@ -85,7 +75,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
         }
     }
 
-    /** Un seguidor reenvía la escritura al líder por RMI: el cliente puede hablar con cualquier nodo. */
     private ResultadoRegistro reenviarAlLider(SolicitudRegistro s, Integer liderId) throws VotoRechazadoException {
         if (liderId == null || s.reenviadoPor() != null) {
             raft.ev("VOTO", "SIN_LIDER", s.traza(), "No es el líder y no conoce un líder vigente: pide reintentar", null);
@@ -140,10 +129,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
         }
     }
 
-    /**
-     * Lecturas consistentes: si este nodo no es el líder, le pregunta al líder.
-     * Si el líder no responde, contesta con su copia local e indica que puede estar desactualizada.
-     */
     @Override
     public Resultados resultados(boolean soloLocal) throws RemoteException {
         verificarDisponible();
@@ -151,7 +136,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
             try {
                 return raft.par(raft.liderId()).llamar(n -> n.resultados(true));
             } catch (Exception ignorada) {
-                // líder inaccesible
             }
         }
         return raft.leer(m -> new Resultados(m.total(), m.resultados(), raft.id(), raft.rol() == NodoRaft.Rol.LIDER));
@@ -164,7 +148,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
             try {
                 return raft.par(raft.liderId()).llamar(n -> n.votos(true));
             } catch (Exception ignorada) {
-                // líder inaccesible
             }
         }
         return raft.leer(m -> new ListadoVotos(m.listado(), raft.id(), raft.rol() == NodoRaft.Rol.LIDER));
@@ -175,8 +158,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
         return raft.estado();
     }
 
-    // ------------------------------------------------------------ trazabilidad
-
     @Override
     public void suscribir(OyenteEventos oyente) {
         raft.suscribir(oyente);
@@ -186,8 +167,6 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
     public ArchivoNodo leerArchivo() {
         return raft.leerArchivo();
     }
-
-    // ------------------------------------------------------------ simulación de fallos
 
     @Override
     public EstadoNodo pausar() {

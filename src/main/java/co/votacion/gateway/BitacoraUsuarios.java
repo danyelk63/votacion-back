@@ -10,14 +10,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
 
-/**
- * Log de auditoría de usuarios: registra cada acción que hace una persona
- * desde el navegador (quién, cuándo, desde dónde, qué pidió y qué respondió el
- * sistema) en el archivo {@code datos/gateway/usuarios.log}, y además la publica
- * como evento USUARIO para verla en tiempo real.
- */
 public class BitacoraUsuarios {
-
     static final String CABECERA = "# fecha | accion | resultado | nombre | cedula | candidato | ip | navegador | nodo_atendio | traza | detalle";
 
     private final Path archivo;
@@ -31,7 +24,6 @@ public class BitacoraUsuarios {
                 + CABECERA + System.lineSeparator(), StandardCharsets.UTF_8);
     }
 
-    /** Deja usuarios.log solo con la cabecera. */
     public synchronized void vaciar() throws IOException {
         Files.writeString(archivo, "# Auditoría de usuarios (reiniciado " + Instant.now() + ")" + System.lineSeparator()
                 + CABECERA + System.lineSeparator(), StandardCharsets.UTF_8);

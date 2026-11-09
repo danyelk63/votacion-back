@@ -3,10 +3,7 @@ package co.votacion.comun;
 import java.util.Arrays;
 import java.util.List;
 
-/** Dirección de un nodo: host y puerto de su RMI Registry. */
 public record DireccionNodo(int id, String host, int puerto) {
-
-    /** Convierte "1=localhost:1101,2=localhost:1102" en una lista de direcciones. */
     public static List<DireccionNodo> parsear(String texto) {
         if (texto == null || texto.isBlank()) return List.of();
         return Arrays.stream(texto.split(","))
