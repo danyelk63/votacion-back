@@ -16,7 +16,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import co.votacion.comun.Evento;
+
 import java.net.URI;
+import java.net.http.WebSocket;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -50,17 +57,19 @@ class ClusterTest {
 
     private static final List<ServidorNodo> nodos = new ArrayList<>();
     private static Gateway gateway;
+    private static Path datos;
     private static final HttpClient http = HttpClient.newHttpClient();
     private static final ObjectMapper json = new ObjectMapper();
 
     @BeforeAll
     static void levantar() throws Exception {
+        datos = Files.createTempDirectory("votacion-test");
         ClienteRmi.configurarTimeouts(300, 5000);
         for (DireccionNodo d : DIRS) {
             List<DireccionNodo> pares = DIRS.stream().filter(p -> p.id() != d.id()).toList();
-            nodos.add(new ServidorNodo(d.id(), d.puerto(), pares, RAPIDO, true));
+            nodos.add(new ServidorNodo(d.id(), d.puerto(), pares, RAPIDO, datos.resolve("nodo-" + d.id()), true));
         }
-        gateway = new Gateway(BASE, DIRS, true);
+        gateway = new Gateway(BASE, BASE + 10, BASE + 11, DIRS, datos.resolve("gateway"), true);
         gateway.iniciar();
     }
 
@@ -144,7 +153,7 @@ class ClusterTest {
                 .findFirst().orElseThrow();
         ClienteRmi cliente = new ClienteRmi(DIRS.get(seguidor.id() - 1));
         VotoRechazadoException e = assertThrows(VotoRechazadoException.class, () -> cliente.llamar(
-                n -> n.registrarVoto(new SolicitudRegistro("Ana Pérez", "1012345678", "C2", null))));
+                n -> n.registrarVoto(new SolicitudRegistro("Ana Pérez", "1012345678", "C2", null, "t-dup"))));
         assertEquals(VotoRechazadoException.Codigo.CEDULA_DUPLICADA, e.getCodigo());
 
         assertEquals(409, api("POST", "/api/votos", voto("Ana Pérez", "1012345678", "C2")).status());
@@ -191,7 +200,7 @@ class ClusterTest {
 
         ClienteRmi cliente = new ClienteRmi(DIRS.get(lider.id() - 1));
         VotoRechazadoException e = assertThrows(VotoRechazadoException.class, () -> cliente.llamar(
-                n -> n.registrarVoto(new SolicitudRegistro("Carla Ríos", "55566677", "C1", null))));
+                n -> n.registrarVoto(new SolicitudRegistro("Carla Ríos", "55566677", "C1", null, "t-sin"))));
         assertEquals(VotoRechazadoException.Codigo.TIMEOUT, e.getCodigo());
         assertEquals(antes, votosEn(lider.id()), "sin mayoría no se confirma nada");
 
@@ -208,7 +217,7 @@ class ClusterTest {
         for (int i = 0; i < 10; i++) {
             final int k = i;
             tareas.add(() -> new ClienteRmi(DIRS.get(k % 3)).llamar(n -> n.registrarVoto(
-                    new SolicitudRegistro("Votante Numero", String.valueOf(30000000 + k), k % 2 == 0 ? "C1" : "C2", null))));
+                    new SolicitudRegistro("Votante Numero", String.valueOf(30000000 + k), k % 2 == 0 ? "C1" : "C2", null, "t-" + k))));
         }
         for (Future<Object> f : pool.invokeAll(tareas)) assertNotNull(f.get());
         pool.shutdown();
@@ -217,5 +226,63 @@ class ClusterTest {
         esperarHasta(() -> votosEn(1) == total && votosEn(2) == total && votosEn(3) == total, "réplicas completas");
         var ordenes = new HashSet<>(nodos.stream().map(n -> n.raft().leer(m -> m.cedulasEnOrden())).toList());
         assertEquals(1, ordenes.size(), "todos los nodos aplican los votos en el mismo orden");
+    }
+
+    @Test
+    @Order(8)
+    void cadaVotoEsTrazableDeExtremoAExtremoYQuedaEnLosArchivos() throws Exception {
+        esperarLider(null);
+        // Cliente WebSocket como el del navegador
+        List<String> mensajes = new CopyOnWriteArrayList<>();
+        WebSocket ws = http.newWebSocketBuilder().buildAsync(URI.create("ws://localhost:" + (BASE + 10)),
+                new WebSocket.Listener() {
+                    final StringBuilder parcial = new StringBuilder();
+
+                    @Override
+                    public CompletionStage<?> onText(WebSocket w, CharSequence data, boolean ultimo) {
+                        parcial.append(data);
+                        if (ultimo) {
+                            mensajes.add(parcial.toString());
+                            parcial.setLength(0);
+                        }
+                        w.request(1);
+                        return null;
+                    }
+                }).join();
+        esperarHasta(() -> mensajes.stream().anyMatch(m -> m.contains("\"historial\"")), "historial por WebSocket");
+        esperarHasta(() -> gateway.central().historial().stream().filter(e -> "SUSCRIPCION".equals(e.etapa())).count() >= 3,
+                "el gateway se suscribe por callback RMI a los 3 nodos");
+
+        Http r = api("POST", "/api/votos", voto("Diana Mora", "52998877", "C1"));
+        assertEquals(200, r.status(), r.cuerpo().toString());
+        String traza = (String) r.cuerpo().get("traza");
+        assertNotNull(traza);
+
+        // Todas las etapas, desde el HTTP hasta el archivo en los 3 nodos.
+        esperarHasta(() -> gateway.central().historial().stream()
+                .filter(e -> traza.equals(e.traza()) && "GUARDADO_ARCHIVO".equals(e.etapa())).count() == 3, "3 archivos");
+        esperarHasta(() -> gateway.central().historial().stream()
+                .anyMatch(e -> traza.equals(e.traza()) && "VOTAR".equals(e.etapa())), "log de usuario");
+        List<Evento> eventos = gateway.central().historial().stream().filter(e -> traza.equals(e.traza())).toList();
+        List<String> etapas = eventos.stream().map(Evento::etapa).toList();
+        for (String etapa : List.of("RECIBIDO_HTTP", "LLAMADA_RMI", "RECIBIDO_RMI", "VALIDACION", "VERIFICACION",
+                "ANEXADO_LOG", "ENVIO", "ENTRADA_RECIBIDA", "ACK", "CONFIRMADO", "APLICADO", "GUARDADO_ARCHIVO",
+                "RESPUESTA", "RESPUESTA_HTTP", "VOTAR")) {
+            assertTrue(etapas.contains(etapa), "falta la etapa " + etapa + " en " + etapas);
+        }
+        assertTrue(eventos.stream().filter(e -> "ANEXADO_LOG".equals(e.etapa())).allMatch(e -> "LIDER".equals(e.rol())));
+        assertTrue(eventos.stream().filter(e -> "ENTRADA_RECIBIDA".equals(e.etapa())).allMatch(e -> "SEGUIDOR".equals(e.rol())));
+        esperarHasta(() -> mensajes.stream().anyMatch(m -> m.contains(traza) && m.contains("GUARDADO_ARCHIVO")),
+                "el evento llega al navegador por WebSocket");
+        ws.abort();
+
+        for (DireccionNodo d : DIRS) {
+            List<String> lineas = Files.readAllLines(datos.resolve("nodo-" + d.id()).resolve("votos.txt"));
+            assertTrue(lineas.stream().anyMatch(l -> l.contains("52998877") && l.contains(traza)),
+                    "votos.txt del nodo " + d.id());
+        }
+        List<String> usuariosLog = Files.readAllLines(datos.resolve("gateway").resolve("usuarios.log"));
+        assertTrue(usuariosLog.stream().anyMatch(l -> l.contains("VOTAR") && l.contains("ACEPTADO") && l.contains(traza)));
+        assertTrue(usuariosLog.stream().noneMatch(l -> l.contains("52998877")), "la cédula va enmascarada en el log de usuarios");
     }
 }

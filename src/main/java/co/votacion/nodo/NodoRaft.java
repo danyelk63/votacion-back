@@ -2,7 +2,10 @@ package co.votacion.nodo;
 
 import co.votacion.comun.ClienteRmi;
 import co.votacion.comun.EntradaLog;
+import co.votacion.comun.ArchivoNodo;
 import co.votacion.comun.EstadoNodo;
+import co.votacion.comun.Evento;
+import co.votacion.comun.OyenteEventos;
 import co.votacion.comun.RespuestaAnexar;
 import co.votacion.comun.RespuestaVoto;
 import co.votacion.comun.SolicitudAnexar;
@@ -11,6 +14,8 @@ import co.votacion.comun.Voto;
 import co.votacion.comun.VotoRechazadoException;
 import co.votacion.comun.VotoRechazadoException.Codigo;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -29,7 +34,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 
 /**
  * Implementación didáctica del algoritmo de consenso Raft
@@ -74,7 +78,9 @@ public class NodoRaft {
     private final int id;
     private final Map<Integer, ClienteRmi> pares = new LinkedHashMap<>();
     private final ConfigRaft cfg;
-    private final Consumer<String> log;
+    private final Bitacora bitacora;
+    private final AlmacenVotos almacen;
+    private final Set<Integer> paresInaccesibles = ConcurrentHashMap.newKeySet();
 
     // Estado "persistente" de Raft (en memoria)
     private long terminoActual = 0;
@@ -101,11 +107,16 @@ public class NodoRaft {
     private ScheduledFuture<?> temporizadorEleccion;
     private ScheduledFuture<?> temporizadorLatido;
 
-    public NodoRaft(int id, List<ClienteRmi> pares, ConfigRaft cfg, Consumer<String> log) {
+    /**
+     * @param dirDatos carpeta donde el nodo escribe sus archivos (votos.txt y eventos.log)
+     * @param consola  si imprime los eventos en la salida estándar
+     */
+    public NodoRaft(int id, List<ClienteRmi> pares, ConfigRaft cfg, Path dirDatos, boolean consola) {
         this.id = id;
         pares.forEach(p -> this.pares.put(p.id(), p));
         this.cfg = cfg;
-        this.log = log;
+        this.bitacora = new Bitacora(dirDatos.resolve("eventos.log"), consola);
+        this.almacen = new AlmacenVotos(id, dirDatos.resolve("votos.txt"));
         this.planificador = Executors.newSingleThreadScheduledExecutor(hilo("raft-" + id + "-timer"));
         this.rpcs = Executors.newCachedThreadPool(hilo("raft-" + id + "-rpc"));
     }
@@ -113,7 +124,8 @@ public class NodoRaft {
     // ================================================================== ciclo de vida
 
     public synchronized void iniciar() {
-        log.accept("Nodo " + id + " iniciado como SEGUIDOR (cluster de " + tamanoCluster() + " nodos)");
+        ev("SISTEMA", "INICIO", null, "Nodo iniciado como SEGUIDOR en un clúster de " + tamanoCluster() + " nodos",
+                Evento.datos("votos", almacen.archivo().toAbsolutePath(), "eventos", bitacora.archivo().toAbsolutePath()));
         reiniciarTemporizadorEleccion();
     }
 
@@ -122,6 +134,7 @@ public class NodoRaft {
         cancelar(temporizadorLatido);
         planificador.shutdownNow();
         rpcs.shutdownNow();
+        bitacora.detener();
     }
 
     /** Simula una caída / partición de red: el nodo deja de participar. */
@@ -129,7 +142,7 @@ public class NodoRaft {
         pausado = true;
         cancelar(temporizadorEleccion);
         cancelar(temporizadorLatido);
-        log.accept("Nodo " + id + " PAUSADO (simulando caida)");
+        ev("SISTEMA", "PAUSADO", null, "Nodo PAUSADO: simula una caída, deja de responder a otros nodos y al gateway", null);
     }
 
     public synchronized void reanudar() {
@@ -139,7 +152,7 @@ public class NodoRaft {
         // la primera respuesta lo hará retroceder a seguidor.
         if (rol == Rol.LIDER) iniciarLatidos();
         else reiniciarTemporizadorEleccion();
-        log.accept("Nodo " + id + " REANUDADO");
+        ev("SISTEMA", "REANUDADO", null, "Nodo REANUDADO: vuelve a participar en el clúster", null);
     }
 
     public boolean estaPausado() {
@@ -220,7 +233,8 @@ public class NodoRaft {
         votoPara = id;
         liderId = null;
         final long termino = terminoActual;
-        log.accept("Nodo " + id + " inicia ELECCION para el termino " + termino);
+        ev("ELECCION", "CANDIDATURA", null, "No recibió latidos del líder a tiempo: se postula como CANDIDATO y pide votos por RMI (solicitarVoto)",
+                Evento.datos("termino", termino, "mayoriaNecesaria", mayoria()));
         reiniciarTemporizadorEleccion(); // si nadie gana (voto dividido), se reintenta
 
         AtomicInteger votos = new AtomicInteger(1); // su propio voto
@@ -240,7 +254,14 @@ public class NodoRaft {
                             return;
                         }
                         if (rol != Rol.CANDIDATO || terminoActual != termino) return;
-                        if (r.votoConcedido() && votos.incrementAndGet() >= mayoria()) convertirseEnLider();
+                        if (r.votoConcedido()) {
+                            int total = votos.incrementAndGet();
+                            ev("ELECCION", "VOTO_RECIBIDO", null, "El nodo " + par.id() + " le concedió su voto ("
+                                    + total + "/" + tamanoCluster() + ", necesita " + mayoria() + ")", null);
+                            if (total >= mayoria()) convertirseEnLider();
+                        } else {
+                            ev("ELECCION", "VOTO_NEGADO", null, "El nodo " + par.id() + " le negó su voto", null);
+                        }
                     }
                 } catch (Exception e) {
                     // par inaccesible: no vota
@@ -258,7 +279,7 @@ public class NodoRaft {
             siguienteIndice.put(p, ultimoIndice() + 1);
             indiceCoincidente.put(p, 0);
         }
-        log.accept("*** Nodo " + id + " es LIDER en el termino " + terminoActual + " ***");
+        ev("ELECCION", "NUEVO_LIDER", null, "Ganó la elección: ahora es el LÍDER del término " + terminoActual, null);
         // Entrada noop: permite confirmar entradas de términos anteriores (§5.4.2 del paper).
         anexar(EntradaLog.Tipo.NOOP, null);
         avanzarConfirmacion();
@@ -276,8 +297,11 @@ public class NodoRaft {
             terminoActual = termino;
             votoPara = null;
         }
-        if (rol != Rol.SEGUIDOR) log.accept("Nodo " + id + " pasa a SEGUIDOR (termino " + terminoActual + ")");
+        Rol anterior = rol;
         rol = Rol.SEGUIDOR;
+        if (anterior != Rol.SEGUIDOR) {
+            ev("ELECCION", "A_SEGUIDOR", null, "Deja de ser " + anterior + ": encontró un término mayor o un líder válido", null);
+        }
         if (nuevoLider != null) liderId = nuevoLider;
         cancelar(temporizadorLatido);
         reiniciarTemporizadorEleccion();
@@ -296,7 +320,11 @@ public class NodoRaft {
         if (conceder) {
             votoPara = s.candidatoId();
             reiniciarTemporizadorEleccion();
-            log.accept("Nodo " + id + " vota por el nodo " + s.candidatoId() + " (termino " + s.termino() + ")");
+            ev("ELECCION", "VOTO_CONCEDIDO", null, "Concede su voto al candidato nodo " + s.candidatoId(),
+                    Evento.datos("terminoCandidato", s.termino()));
+        } else if (s.termino() >= terminoActual) {
+            ev("ELECCION", "VOTO_NEGADO", null, "Niega su voto al nodo " + s.candidatoId() + ": "
+                    + (!logActualizado ? "su log está menos actualizado" : "ya votó por el nodo " + votoPara + " en este término"), null);
         }
         return new RespuestaVoto(terminoActual, conceder);
     }
@@ -324,6 +352,12 @@ public class NodoRaft {
                 registro.subList(siguiente, Math.min(registro.size(), siguiente + MAX_ENTRADAS_POR_RPC)));
         SolicitudAnexar solicitud = new SolicitudAnexar(termino, id, previo, registro.get(previo).termino(),
                 entradas, indiceConfirmado);
+        for (EntradaLog e : entradas) {
+            if (e.tipo() == EntradaLog.Tipo.VOTO) {
+                ev("REPLICACION", "ENVIO", e.voto().traza(), "Envía la entrada #" + e.indice()
+                        + " al nodo " + par.id() + " (anexarEntradas por RMI)", Evento.datos("destino", par.id()));
+            }
+        }
 
         rpcs.submit(() -> {
             boolean pendiente = false;
@@ -331,23 +365,40 @@ public class NodoRaft {
                 RespuestaAnexar r = par.llamar(n -> n.anexarEntradas(solicitud));
                 synchronized (this) {
                     if (pausado) return;
+                    if (paresInaccesibles.remove(par.id())) {
+                        ev("RED", "PAR_RECUPERADO", null, "El nodo " + par.id() + " vuelve a responder por RMI", null);
+                    }
                     if (r.termino() > terminoActual) {
                         retrocederASeguidor(r.termino(), null);
                         return;
                     }
                     if (rol != Rol.LIDER || terminoActual != termino) return;
                     if (r.exito()) {
+                        for (EntradaLog e : entradas) {
+                            if (e.tipo() == EntradaLog.Tipo.VOTO) {
+                                ev("REPLICACION", "ACK", e.voto().traza(), "El nodo " + par.id()
+                                        + " confirma que guardó la entrada #" + e.indice() + " en su log",
+                                        Evento.datos("seguidor", par.id()));
+                            }
+                        }
                         indiceCoincidente.merge(par.id(), r.indiceCoincidente(), Math::max);
                         siguienteIndice.put(par.id(), indiceCoincidente.get(par.id()) + 1);
                         avanzarConfirmacion();
                     } else {
                         // Inconsistencia: retroceder hasta encontrar el punto en común con el seguidor.
                         siguienteIndice.put(par.id(), Math.max(1, Math.min(r.indiceConflicto(), previo)));
+                        ev("REPLICACION", "INCONSISTENCIA", null, "El log del nodo " + par.id()
+                                + " no coincide en el índice " + previo + ": se reintentará desde el "
+                                + siguienteIndice.get(par.id()), null);
                     }
                     pendiente = siguienteIndice.get(par.id()) <= ultimoIndice();
                 }
             } catch (Exception e) {
                 // par caído o pausado: se reintenta en el próximo latido
+                if (paresInaccesibles.add(par.id())) {
+                    ev("RED", "PAR_CAIDO", null, "El nodo " + par.id() + " no responde a las llamadas RMI (caído o pausado)",
+                            Evento.datos("error", e.getClass().getSimpleName()));
+                }
             } finally {
                 enVuelo.remove(par.id());
             }
@@ -367,6 +418,13 @@ public class NodoRaft {
             long replicas = 1 + pares.keySet().stream()
                     .filter(p -> indiceCoincidente.getOrDefault(p, 0) >= indice).count();
             if (replicas >= mayoria()) {
+                for (int k = indiceConfirmado + 1; k <= n; k++) {
+                    EntradaLog e = registro.get(k);
+                    if (e.tipo() == EntradaLog.Tipo.VOTO) {
+                        ev("VOTO", "CONFIRMADO", e.voto().traza(), "Entrada #" + k + " CONFIRMADA: ya está en "
+                                + replicas + " de " + tamanoCluster() + " nodos (mayoría = " + mayoria() + ")", null);
+                    }
+                }
                 indiceConfirmado = n;
                 aplicarConfirmadas();
                 break;
@@ -380,7 +438,7 @@ public class NodoRaft {
 
         if (s.termino() > terminoActual || rol != Rol.SEGUIDOR) retrocederASeguidor(s.termino(), s.liderId());
         if (liderId == null || liderId != s.liderId()) {
-            log.accept("Nodo " + id + " reconoce al nodo " + s.liderId() + " como LIDER");
+            ev("ELECCION", "RECONOCE_LIDER", null, "Reconoce al nodo " + s.liderId() + " como LÍDER del término " + s.termino(), null);
         }
         liderId = s.liderId();
         reiniciarTemporizadorEleccion();
@@ -400,7 +458,13 @@ public class NodoRaft {
         for (EntradaLog entrada : s.entradas()) {
             int i = entrada.indice();
             if (i <= ultimoIndice() && registro.get(i).termino() != entrada.termino()) truncarDesde(i);
-            if (i > ultimoIndice()) registro.add(entrada);
+            if (i > ultimoIndice()) {
+                registro.add(entrada);
+                if (entrada.tipo() == EntradaLog.Tipo.VOTO) {
+                    ev("REPLICACION", "ENTRADA_RECIBIDA", entrada.voto().traza(), "Recibe del líder (nodo "
+                            + s.liderId() + ") la entrada #" + i + " y la agrega a su log (aún sin confirmar)", null);
+                }
+            }
         }
 
         int ultimoNuevo = s.indiceLogPrevio() + s.entradas().size();
@@ -412,7 +476,8 @@ public class NodoRaft {
     }
 
     private void truncarDesde(int indice) {
-        log.accept("Nodo " + id + " descarta entradas NO confirmadas desde el indice " + indice);
+        ev("REPLICACION", "TRUNCADO", null, "Descarta entradas NO confirmadas desde el índice " + indice
+                + " porque no coinciden con el log del líder", null);
         registro.subList(indice, registro.size()).clear();
         esperas.entrySet().removeIf(e -> {
             if (e.getKey() < indice) return false;
@@ -428,9 +493,20 @@ public class NodoRaft {
             EntradaLog entrada = registro.get(ultimoAplicado);
             boolean aplicado = maquina.aplicar(entrada);
             if (entrada.tipo() == EntradaLog.Tipo.VOTO) {
-                String cedula = entrada.voto().cedula();
-                log.accept("Nodo " + id + " aplica voto #" + entrada.indice() + " (cedula ..."
-                        + cedula.substring(cedula.length() - 4) + ")" + (aplicado ? "" : " RECHAZADO: duplicado"));
+                String traza = entrada.voto().traza();
+                if (aplicado) {
+                    ev("VOTO", "APLICADO", traza, "Aplica la entrada #" + entrada.indice()
+                            + " al registro electoral en memoria", Evento.datos("conteo", maquina.conteo()));
+                    try {
+                        int linea = almacen.guardar(entrada);
+                        ev("PERSISTENCIA", "GUARDADO_ARCHIVO", traza, "Guarda el voto en el archivo de texto del servidor",
+                                Evento.datos("archivo", almacen.archivo().toAbsolutePath(), "registro", linea));
+                    } catch (IOException ex) {
+                        ev("PERSISTENCIA", "ERROR_ARCHIVO", traza, "No se pudo escribir el archivo: " + ex.getMessage(), null);
+                    }
+                } else {
+                    ev("VOTO", "RECHAZADO", traza, "Entrada #" + entrada.indice() + " descartada: la cédula ya había votado", null);
+                }
             }
             Espera espera = esperas.remove(entrada.indice());
             if (espera == null) continue;
@@ -452,8 +528,9 @@ public class NodoRaft {
      * Registra un voto. Solo el líder acepta escrituras: agrega la entrada al log,
      * la replica y espera a que la mayoría la confirme.
      */
-    EntradaLog registrarComoLider(String nombre, String cedula, String candidato)
+    EntradaLog registrarComoLider(String nombre, String cedula, String candidato, String traza)
             throws NoEsLiderException, VotoRechazadoException, InterruptedException {
+        long inicio = System.nanoTime();
         CompletableFuture<EntradaLog> futuro = new CompletableFuture<>();
         int indice;
         synchronized (this) {
@@ -462,29 +539,57 @@ public class NodoRaft {
             boolean pendienteMismaCedula = registro.subList(indiceConfirmado + 1, registro.size()).stream()
                     .anyMatch(e -> e.tipo() == EntradaLog.Tipo.VOTO && e.voto().cedula().equals(cedula));
             if (maquina.yaVoto(cedula) || pendienteMismaCedula) {
+                ev("VOTO", "RECHAZADO", traza, "Cédula duplicada: " + Evento.enmascarar(cedula) + " ya tiene un voto "
+                        + (pendienteMismaCedula ? "en proceso" : "confirmado"), null);
                 throw new VotoRechazadoException(Codigo.CEDULA_DUPLICADA, "Esta cédula ya registró su voto");
             }
+            ev("VOTO", "VERIFICACION", traza, "Verifica en el registro que la cédula " + Evento.enmascarar(cedula)
+                    + " no haya votado: OK", null);
 
-            Voto voto = new Voto(nombre, cedula, candidato, java.time.Instant.now().toString(), id);
+            Voto voto = new Voto(nombre, cedula, candidato, java.time.Instant.now().toString(), id, traza);
             EntradaLog entrada = anexar(EntradaLog.Tipo.VOTO, voto);
             indice = entrada.indice();
             esperas.put(indice, new Espera(entrada.id(), futuro));
-            log.accept("Nodo " + id + " (lider) agrega voto #" + indice + " al log y lo replica");
+            ev("VOTO", "ANEXADO_LOG", traza, "Agrega el voto a su log como entrada #" + indice
+                    + " (término " + terminoActual + ") y lo replica a los seguidores",
+                    Evento.datos("indice", indice, "candidato", candidato));
             avanzarConfirmacion(); // en un clúster de 1 nodo se confirma de inmediato
             replicarATodos();
         }
         try {
-            return futuro.get(cfg.timeoutConfirmacionMs(), TimeUnit.MILLISECONDS);
+            EntradaLog confirmada = futuro.get(cfg.timeoutConfirmacionMs(), TimeUnit.MILLISECONDS);
+            ev("VOTO", "RESPUESTA", traza, "Responde ÉXITO a quien hizo la llamada RMI",
+                    Evento.datos("duracionMs", (System.nanoTime() - inicio) / 1_000_000));
+            return confirmada;
         } catch (TimeoutException e) {
             synchronized (this) {
                 esperas.remove(indice);
             }
+            ev("VOTO", "RECHAZADO", traza, "No logró la mayoría en " + cfg.timeoutConfirmacionMs()
+                    + " ms: hay demasiados nodos caídos", null);
             throw new VotoRechazadoException(Codigo.TIMEOUT,
                     "No se logró replicar el voto en la mayoría del clúster a tiempo");
         } catch (ExecutionException e) {
             if (e.getCause() instanceof VotoRechazadoException v) throw v;
             throw new IllegalStateException(e.getCause());
         }
+    }
+
+    // ================================================================== trazabilidad
+
+    /** Emite un evento con el rol y término actuales del nodo. */
+    synchronized void ev(String categoria, String etapa, String traza, String mensaje, java.util.Map<String, String> datos) {
+        bitacora.publicar(Evento.nuevo("NODO", id, rol.name(), terminoActual, categoria, etapa, traza, mensaje, datos));
+    }
+
+    void suscribir(OyenteEventos oyente) {
+        if (bitacora.suscribir(oyente)) {
+            ev("SISTEMA", "SUSCRIPCION", null, "El gateway se suscribió a los eventos de este nodo (callback RMI)", null);
+        }
+    }
+
+    ArchivoNodo leerArchivo() {
+        return almacen.leer(200);
     }
 
     // ================================================================== utilidades

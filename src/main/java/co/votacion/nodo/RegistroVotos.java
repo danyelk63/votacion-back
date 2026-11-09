@@ -51,6 +51,10 @@ public class RegistroVotos {
         return true;
     }
 
+    public Map<String, Integer> conteo() {
+        return new LinkedHashMap<>(conteo);
+    }
+
     List<ResultadoCandidato> resultados() {
         int total = total();
         return Candidato.TODOS.stream().map(c -> {

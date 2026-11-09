@@ -1,6 +1,9 @@
 package co.votacion.nodo;
 
+import co.votacion.comun.ArchivoNodo;
 import co.votacion.comun.ClienteRmi;
+import co.votacion.comun.Evento;
+import co.votacion.comun.OyenteEventos;
 import co.votacion.comun.EntradaLog;
 import co.votacion.comun.EstadoNodo;
 import co.votacion.comun.ListadoVotos;
@@ -56,12 +59,20 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
     @Override
     public ResultadoRegistro registrarVoto(SolicitudRegistro s) throws RemoteException, VotoRechazadoException {
         verificarDisponible();
+        String traza = s.traza();
+        raft.ev("VOTO", "RECIBIDO_RMI", traza, "Llega la invocación remota registrarVoto() desde "
+                + (s.reenviadoPor() == null ? "el gateway" : "el nodo " + s.reenviadoPor()),
+                Evento.datos("nombre", s.nombre(), "cedula", Evento.enmascarar(s.cedula()), "candidato", s.candidato()));
+
         Validacion.Resultado v = Validacion.validar(s);
         if (!v.errores().isEmpty()) {
+            raft.ev("VOTO", "VALIDACION", traza, "Datos inválidos: " + String.join("; ", v.errores()), null);
             throw new VotoRechazadoException(Codigo.DATOS_INVALIDOS, "Datos inválidos", v.errores());
         }
+        raft.ev("VOTO", "VALIDACION", traza, "Valida y normaliza los datos (nombre, cédula de 6 a 10 dígitos, candidato): OK",
+                Evento.datos("cedulaNormalizada", Evento.enmascarar(v.cedula())));
         try {
-            EntradaLog e = raft.registrarComoLider(v.nombre(), v.cedula(), v.candidato());
+            EntradaLog e = raft.registrarComoLider(v.nombre(), v.cedula(), v.candidato(), traza);
             return new ResultadoRegistro("Voto registrado y replicado en la mayoría del clúster", e.indice(),
                     e.termino(), raft.id(), e.voto().registradoEn(), s.reenviadoPor());
         } catch (NodoRaft.NoEsLiderException e) {
@@ -75,14 +86,21 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
     /** Un seguidor reenvía la escritura al líder por RMI: el cliente puede hablar con cualquier nodo. */
     private ResultadoRegistro reenviarAlLider(SolicitudRegistro s, Integer liderId) throws VotoRechazadoException {
         if (liderId == null || s.reenviadoPor() != null) {
+            raft.ev("VOTO", "SIN_LIDER", s.traza(), "No es el líder y no conoce un líder vigente: pide reintentar", null);
             throw new VotoRechazadoException(Codigo.SIN_LIDER, "No hay líder disponible en este momento, intente de nuevo");
         }
         ClienteRmi lider = raft.par(liderId);
+        raft.ev("VOTO", "REENVIO_LIDER", s.traza(), "No es el líder: solo el líder puede escribir. Reenvía la petición al nodo "
+                + liderId + " por RMI", Evento.datos("destino", lider.direccion()));
         try {
-            return lider.llamar(n -> n.registrarVoto(s.reenviadaPor(raft.id())));
+            ResultadoRegistro r = lider.llamar(n -> n.registrarVoto(s.reenviadaPor(raft.id())));
+            raft.ev("VOTO", "RESPUESTA", s.traza(), "El líder confirmó el voto; devuelve la respuesta al gateway", null);
+            return r;
         } catch (VotoRechazadoException e) {
+            raft.ev("VOTO", "RESPUESTA", s.traza(), "El líder rechazó el voto: " + e.getMessage(), null);
             throw e;
         } catch (Exception e) {
+            raft.ev("RED", "LIDER_INACCESIBLE", s.traza(), "El líder (nodo " + liderId + ") no responde por RMI", null);
             throw new VotoRechazadoException(Codigo.SIN_LIDER, "El líder no responde, intente de nuevo");
         }
     }
@@ -120,6 +138,18 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
     @Override
     public EstadoNodo estado() {
         return raft.estado();
+    }
+
+    // ------------------------------------------------------------ trazabilidad
+
+    @Override
+    public void suscribir(OyenteEventos oyente) {
+        raft.suscribir(oyente);
+    }
+
+    @Override
+    public ArchivoNodo leerArchivo() {
+        return raft.leerArchivo();
     }
 
     // ------------------------------------------------------------ simulación de fallos

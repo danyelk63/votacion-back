@@ -8,13 +8,14 @@ Cada voto registra el **nombre**, la **cédula de ciudadanía** y uno de **2 can
 
 ```
  Navegador (Angular · votacion-front)
-        │  HTTP / JSON  (el navegador no puede hablar RMI)
-        ▼
- ┌──────────────┐
- │   Gateway    │  cliente RMI · balanceo round-robin · failover
- └──────┬───────┘
-        │  Java RMI  (cliente → servidor)
-        ▼
+        │  HTTP/JSON :8080        ▲  WebSocket :8081 (eventos en tiempo real)
+        ▼                         │
+ ┌───────────────────────────────────────┐
+ │ Gateway  cliente RMI · failover ·      │
+ │          callback RMI :1100 · usuarios.log
+ └──────┬────────────────────▲───────────┘
+        │  Java RMI          │  callback RMI: OyenteEventos.recibir(evento)
+        ▼  (cliente→servidor)│  (servidor → cliente)
  ┌─────────┐   RMI   ┌─────────┐   RMI   ┌─────────┐
  │ Nodo 1  │◄───────►│ Nodo 2  │◄───────►│ Nodo 3  │   (servidor ↔ servidor)
  │ Registry│         │ Registry│         │ Registry│
@@ -31,6 +32,8 @@ RMI se usa en **dos niveles**:
 | Cliente → servidor | Gateway → nodo | `registrarVoto`, `resultados`, `votos`, `estado`, `pausar`, `reanudar` | Atender al usuario |
 | Servidor ↔ servidor | Nodo → nodo | `solicitarVoto`, `anexarEntradas` | Elegir líder y replicar los votos (Raft) |
 | Servidor ↔ servidor | Seguidor → líder | `registrarVoto`, `resultados` | Reenviar escrituras y lecturas al líder |
+| **Callback** (servidor → cliente) | Nodo → gateway | `OyenteEventos.recibir` | Enviar cada evento del nodo en tiempo real |
+| Cliente → servidor | Gateway → nodo | `suscribir`, `leerArchivo` | Registrar el callback y leer `votos.txt` |
 
 ### Piezas RMI en el código
 
@@ -43,6 +46,8 @@ RMI se usa en **dos niveles**:
 | Objetos que viajan por la red (`Serializable`) | `comun/*.java` (records) |
 | Excepción de negocio que viaja por RMI | [`comun/VotoRechazadoException.java`](src/main/java/co/votacion/comun/VotoRechazadoException.java) |
 | Timeouts de RMI para detectar caídas | `ClienteRmi.configurarTimeouts` |
+| Interfaz remota de **callback** | [`comun/OyenteEventos.java`](src/main/java/co/votacion/comun/OyenteEventos.java) |
+| Objeto de callback exportado por el gateway | [`gateway/ReceptorEventos.java`](src/main/java/co/votacion/gateway/ReceptorEventos.java) |
 
 ## ¿Por qué es un sistema distribuido?
 
@@ -62,6 +67,41 @@ RMI se usa en **dos niveles**:
 5. Solo puede ganar una elección un nodo con el log **al menos tan actualizado** como la mayoría. Así un voto confirmado nunca se pierde.
 
 La implementación está en [`nodo/NodoRaft.java`](src/main/java/co/votacion/nodo/NodoRaft.java), comentada paso a paso.
+
+## Trazabilidad
+
+Cada paso que da el sistema genera un **evento** ([`Evento`](src/main/java/co/votacion/comun/Evento.java)) con:
+
+- la hora en milisegundos
+- el nodo que lo generó y su **tipo en ese momento** (LÍDER, SEGUIDOR, CANDIDATO o GATEWAY) y su término de Raft
+- la categoría, la etapa y el mensaje
+- la **traza**: un id que el gateway asigna a cada voto y que viaja con él por todos los nodos
+
+**Flujo de los eventos:** nodo → *callback RMI* → gateway → *WebSocket* → navegador.
+
+Etapas que recorre un voto:
+
+| Fase | Etapas (quién) |
+|---|---|
+| Llega | `RECIBIDO_HTTP` (gateway) |
+| Viaja por RMI | `LLAMADA_RMI`, `FAILOVER` (gateway) · `RECIBIDO_RMI`, `REENVIO_LIDER` (nodo) |
+| Se procesa | `VALIDACION`, `VERIFICACION`, `ANEXADO_LOG` (líder) |
+| Se replica | `ENVIO`, `ACK` (líder) · `ENTRADA_RECIBIDA` (seguidores) |
+| Consenso | `CONFIRMADO` (líder, por mayoría) |
+| Se aplica | `APLICADO` (cada nodo) |
+| Se guarda | `GUARDADO_ARCHIVO` (cada nodo) |
+| Respuesta | `RESPUESTA` (líder) · `RESPUESTA_HTTP`, `VOTAR` (gateway) |
+
+### Archivos de texto (en vez de base de datos)
+
+| Archivo | Quién lo escribe | Contenido |
+|---|---|---|
+| `datos/nodo-N/votos.txt` | cada nodo | Una línea por voto confirmado: fecha, índice del log, término, cédula, nombre, candidato, nodo líder y traza |
+| `datos/nodo-N/eventos.log` | cada nodo | Todos los eventos del nodo |
+| `datos/gateway/usuarios.log` | gateway | Auditoría de usuarios: fecha, acción, resultado, nombre, cédula enmascarada, IP, navegador, nodo y traza |
+| `datos/gateway/eventos.log` | gateway | Eventos propios del gateway |
+
+Los archivos se reinician cada vez que arranca el proceso. Un nodo que vuelve reconstruye su `votos.txt` con lo que le reenvía el líder.
 
 ## Requisitos
 
@@ -83,6 +123,7 @@ java -jar target/votacion.jar nodo 1 1101 "2=localhost:1102,3=localhost:1103"
 java -jar target/votacion.jar nodo 2 1102 "1=localhost:1101,3=localhost:1103"
 java -jar target/votacion.jar nodo 3 1103 "1=localhost:1101,2=localhost:1102"
 java -jar target/votacion.jar gateway 8080 "1=localhost:1101,2=localhost:1102,3=localhost:1103"
+#   el gateway también abre el WebSocket en 8081 y el callback RMI en 1100
 ```
 
 ### En varias computadoras (misma red)
@@ -94,7 +135,7 @@ Usen la IP de cada máquina en lugar de `localhost` y arranquen cada nodo indica
 java -Djava.rmi.server.hostname=192.168.1.10 -jar votacion.jar nodo 1 1101 "2=192.168.1.11:1102,3=192.168.1.12:1103"
 ```
 
-Hay que abrir en el firewall los puertos 1101–1103 y el 8080.
+Hay que abrir en el firewall los puertos 1100–1103, 8080 y 8081. El gateway también necesita `-Djava.rmi.server.hostname=<su IP>`, para que los nodos puedan llamar a su callback.
 
 ## API REST del gateway (puerto 8080)
 
@@ -107,6 +148,9 @@ Hay que abrir en el firewall los puertos 1101–1103 y el 8080.
 | GET | `/api/cluster` | Estado de cada nodo: rol, término, líder, log, réplicas |
 | POST | `/api/cluster/{id}/pausar` | Simula la caída de un nodo |
 | POST | `/api/cluster/{id}/reanudar` | Lo recupera |
+| GET | `/api/eventos` | Historial de eventos |
+| GET | `/api/archivos` | Contenido de `votos.txt` de cada nodo (leído por RMI) y de `usuarios.log` |
+| WS | `ws://localhost:8081` | Eventos en tiempo real: `{"tipo":"historial",...}` al conectar y luego `{"tipo":"evento",...}` |
 
 Códigos de respuesta de `POST /api/votos`:
 
@@ -118,7 +162,7 @@ Códigos de respuesta de `POST /api/votos`:
 ## Guion sugerido para la demo
 
 1. Levantar el clúster y mostrar en los logs cómo un nodo **gana la elección**.
-2. Registrar un voto y ver en las 3 consolas `aplica voto #N`.
+2. Registrar un voto y seguirlo en las vistas *Log del servidor* y *Procesamiento del voto* del front, o en las consolas de los nodos.
 3. Intentar votar con la misma cédula: rechazado (409).
 4. **Tumbar al líder**: cerrar su ventana, hacer `kill`, o pausarlo desde el frontend. Ver cómo los otros eligen un nuevo líder en el siguiente término.
 5. Registrar otro voto: funciona con 2 de 3 nodos.
@@ -139,6 +183,7 @@ mvn test
 - nueva elección tras la caída del líder y recuperación del nodo caído
 - rechazo de votos cuando no hay mayoría
 - mismo orden de votos en todos los nodos ante peticiones concurrentes
+- trazabilidad completa: todas las etapas de un voto llegan por WebSocket, y el voto queda en los 3 `votos.txt` y en `usuarios.log`
 
 ## Limitaciones (a propósito, por ser académico)
 

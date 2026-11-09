@@ -47,6 +47,17 @@ public interface NodoVotacion extends Remote {
     /** Estado interno del nodo (rol, término, log...). Responde aunque el nodo esté pausado. */
     EstadoNodo estado() throws RemoteException;
 
+    // ------------------------------------------------------------ trazabilidad
+
+    /**
+     * Registra un objeto remoto de callback: el nodo le enviará cada evento que
+     * genere (RMI en sentido inverso: servidor -> cliente). Es idempotente.
+     */
+    void suscribir(OyenteEventos oyente) throws RemoteException;
+
+    /** Lee el archivo de texto donde este nodo guarda los votos confirmados. */
+    ArchivoNodo leerArchivo() throws RemoteException;
+
     // ------------------------------------------------------------ simulación de fallos
 
     /** Simula la caída del nodo: deja de responder a todo salvo estado/pausar/reanudar. */
