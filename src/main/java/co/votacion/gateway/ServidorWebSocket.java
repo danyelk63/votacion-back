@@ -39,6 +39,8 @@ public class ServidorWebSocket extends WebSocketServer {
     @Override
     public void onStart() {
         central.suscribir(difusor);
+        // "Vaciar todo": los navegadores conectados limpian sus listas de eventos.
+        central.alVaciar(() -> broadcast("{\"tipo\":\"reinicio\"}"));
         log.accept("WebSocket de eventos escuchando en ws://localhost:" + getPort());
     }
 

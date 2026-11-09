@@ -31,6 +31,12 @@ public class BitacoraUsuarios {
                 + CABECERA + System.lineSeparator(), StandardCharsets.UTF_8);
     }
 
+    /** Deja usuarios.log solo con la cabecera. */
+    public synchronized void vaciar() throws IOException {
+        Files.writeString(archivo, "# Auditoría de usuarios (reiniciado " + Instant.now() + ")" + System.lineSeparator()
+                + CABECERA + System.lineSeparator(), StandardCharsets.UTF_8);
+    }
+
     public Path archivo() {
         return archivo;
     }

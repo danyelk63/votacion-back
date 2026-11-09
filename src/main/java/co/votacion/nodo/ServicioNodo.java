@@ -196,6 +196,12 @@ public class ServicioNodo extends UnicastRemoteObject implements NodoVotacion {
     }
 
     @Override
+    public EstadoNodo reiniciarTodo() {
+        raft.reiniciarTodo();
+        return raft.estado();
+    }
+
+    @Override
     public EstadoNodo reanudar() {
         raft.reanudar();
         return raft.estado();

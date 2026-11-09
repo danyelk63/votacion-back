@@ -58,6 +58,7 @@ import java.util.regex.Pattern;
  * GET  /api/cluster
  * POST /api/cluster/{id}/pausar
  * POST /api/cluster/{id}/reanudar
+ * POST /api/reiniciar              VACIAR TODO: votos, logs y archivos; nueva elección desde término 0
  * GET  /api/eventos                historial de eventos (también llega por WebSocket)
  * GET  /api/archivos               contenido de votos.txt de cada nodo y de usuarios.log
  * WS   ws://host:puertoWs          eventos en tiempo real
@@ -196,6 +197,8 @@ public class Gateway {
                 r = estadoCluster();
             } else if (metodo.equals("POST") && admin.matches()) {
                 r = administrar(ex, Integer.parseInt(admin.group(1)), admin.group(2));
+            } else if (metodo.equals("POST") && ruta.equals("/api/reiniciar")) {
+                r = vaciarTodo();
             } else if (metodo.equals("GET") && ruta.equals("/api/eventos")) {
                 r = new Respuesta(200, central.historial());
             } else if (metodo.equals("GET") && ruta.equals("/api/archivos")) {
@@ -414,6 +417,39 @@ public class Gateway {
         cuerpo.put("usuarios", Map.of("ruta", usuarios.archivo().toAbsolutePath().toString(),
                 "totalLineas", usuarios.totalLineas(), "lineas", usuarios.leer(200)));
         return new Respuesta(200, cuerpo);
+    }
+
+    /**
+     * Vaciar todo para volver a empezar la demostración desde cero. Exige que los 3
+     * procesos respondan: un nodo apagado volvería con su estado viejo.
+     * Pasos: pausar todos -> reiniciar cada uno -> vaciar logs del gateway -> reanudar todos
+     * (y los nodos eligen un líder nuevo desde el término 0).
+     */
+    private synchronized Respuesta vaciarTodo() throws IOException {
+        List<Integer> sinRespuesta = new ArrayList<>();
+        for (ClienteRmi n : nodos) {
+            try {
+                n.llamar(s -> s.estado());
+            } catch (Exception e) {
+                sinRespuesta.add(n.id());
+            }
+        }
+        if (!sinRespuesta.isEmpty()) {
+            return new Respuesta(409, Map.of("error", "Para vaciar todo, los 3 procesos deben estar encendidos. No responden: nodo "
+                    + sinRespuesta.stream().map(String::valueOf).collect(java.util.stream.Collectors.joining(", nodo "))));
+        }
+        try {
+            for (ClienteRmi n : nodos) n.llamar(s -> s.pausar());
+            for (ClienteRmi n : nodos) n.llamar(s -> s.reiniciarTodo());
+            central.vaciar();
+            usuarios.vaciar();
+            central.gateway("SISTEMA", "REINICIO_TOTAL", null,
+                    "Se vació todo: votos, logs y archivos. Los nodos arrancan de cero y eligen un líder nuevo", null);
+            for (ClienteRmi n : nodos) n.llamar(s -> s.reanudar());
+        } catch (Exception e) {
+            return new Respuesta(502, Map.of("error", "Un nodo dejó de responder durante el reinicio: " + e.getMessage()));
+        }
+        return new Respuesta(200, Map.of("mensaje", "Sistema vaciado: los nodos arrancan de cero"));
     }
 
     private Respuesta administrar(HttpExchange ex, int id, String accion) {

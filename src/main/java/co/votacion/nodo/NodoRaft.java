@@ -648,6 +648,39 @@ public class NodoRaft {
         }
     }
 
+    /**
+     * Reinicio TOTAL del nodo, como recién encendido: log de Raft vacío, término 0,
+     * sin votos, archivos votos.txt y eventos.log en blanco. Lo usa el botón
+     * "Vaciar todo" (el gateway pausa todos los nodos, los reinicia y los reanuda).
+     */
+    synchronized void reiniciarTodo() {
+        cancelar(temporizadorEleccion);
+        cancelar(temporizadorLatido);
+        terminoActual = 0;
+        votoPara = null;
+        registro.clear();
+        registro.add(EntradaLog.centinela());
+        indiceConfirmado = 0;
+        ultimoAplicado = 0;
+        rol = Rol.SEGUIDOR;
+        liderId = null;
+        siguienteIndice.clear();
+        indiceCoincidente.clear();
+        paresInaccesibles.clear();
+        ultimosBorrados.clear();
+        esperas.values().forEach(e -> e.futuro().completeExceptionally(
+                new VotoRechazadoException(Codigo.NO_CONFIRMADO, "El sistema se reinició")));
+        esperas.clear();
+        maquina.reiniciar();
+        bitacora.vaciarArchivo();
+        try {
+            almacen.reiniciarDesdeCero();
+        } catch (IOException ignorada) {
+        }
+        ev("SISTEMA", "REINICIO_TOTAL", null, "Estado reiniciado de cero: log vacío, término 0, sin votos ni registros", null);
+        if (!pausado) reiniciarTemporizadorEleccion();
+    }
+
     ArchivoNodo leerArchivo() {
         return almacen.leer(200);
     }

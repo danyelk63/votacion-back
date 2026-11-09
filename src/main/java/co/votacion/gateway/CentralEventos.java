@@ -26,6 +26,7 @@ public class CentralEventos {
 
     private final Deque<Evento> historial = new ArrayDeque<>();
     private final List<Consumer<Evento>> suscriptores = new CopyOnWriteArrayList<>();
+    private final List<Runnable> alVaciar = new CopyOnWriteArrayList<>();
     private final Path archivo;
     private final boolean consola;
     private long secuencia = 0;
@@ -58,6 +59,21 @@ public class CentralEventos {
     /** Evento generado por el gateway. */
     public Evento gateway(String categoria, String etapa, String traza, String mensaje, java.util.Map<String, String> datos) {
         return publicar(Evento.nuevo("GATEWAY", null, "GATEWAY", null, categoria, etapa, traza, mensaje, datos));
+    }
+
+    /** Borra todo el historial y el archivo eventos.log, y avisa a los suscriptores. */
+    public synchronized void vaciar() {
+        historial.clear();
+        secuencia = 0;
+        try {
+            Files.writeString(archivo, "", StandardCharsets.UTF_8);
+        } catch (IOException ignorada) {
+        }
+        alVaciar.forEach(Runnable::run);
+    }
+
+    public void alVaciar(Runnable r) {
+        alVaciar.add(r);
     }
 
     public synchronized List<Evento> historial() {

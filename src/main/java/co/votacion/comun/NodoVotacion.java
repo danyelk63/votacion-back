@@ -70,4 +70,10 @@ public interface NodoVotacion extends Remote {
     EstadoNodo pausar() throws RemoteException;
 
     EstadoNodo reanudar() throws RemoteException;
+
+    /**
+     * Reinicio total del nodo (log de Raft, término, votos y archivos) para volver a
+     * empezar la demostración desde cero. Responde aunque el nodo esté pausado.
+     */
+    EstadoNodo reiniciarTodo() throws RemoteException;
 }

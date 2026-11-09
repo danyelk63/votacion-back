@@ -112,6 +112,14 @@ class ClusterTest {
         throw new AssertionError("No se eligió líder");
     }
 
+    static NodoRaft esperarLiderSinError() {
+        try {
+            return esperarLider(null);
+        } catch (InterruptedException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     static void esperarHasta(BooleanSupplier condicion, String descripcion) throws InterruptedException {
         long fin = System.currentTimeMillis() + 5000;
         while (System.currentTimeMillis() < fin) {
@@ -291,6 +299,9 @@ class ClusterTest {
     void borrarVotosLosEliminaDeTodosLosNodosYDeSusArchivosPorConsenso() throws Exception {
         esperarLider(null);
         assertEquals(200, api("POST", "/api/votos", voto("Elena Paz", "41222333", "C2")).status());
+        // los seguidores aplican el voto en el siguiente latido: esperar a que los 3 coincidan
+        esperarHasta(() -> votosEn(1) == votosEn(2) && votosEn(2) == votosEn(3) && votosEn(1) == esperarLiderSinError().leer(m -> m.total()),
+                "los 3 nodos con el mismo conteo");
         int antes = votosEn(1);
         assertTrue(antes > 0);
 
@@ -312,6 +323,37 @@ class ClusterTest {
 
         // Tras el borrado, la misma cédula puede volver a votar
         assertEquals(200, api("POST", "/api/votos", voto("Elena Paz", "41222333", "C1")).status());
+        esperarHasta(() -> votosEn(1) == 1 && votosEn(2) == 1 && votosEn(3) == 1, "nuevo voto replicado");
+    }
+
+    @Test
+    @Order(10)
+    void vaciarTodoDejaElSistemaComoRecienEncendido() throws Exception {
+        esperarLider(null);
+        assertEquals(200, api("POST", "/api/votos", voto("Mario Luna", "71555666", "C2")).status());
+        esperarHasta(() -> votosEn(1) >= 1 && votosEn(2) >= 1 && votosEn(3) >= 1, "voto replicado");
+        raft(2).pausar(); // un nodo "tumbado" también se reinicia
+
+        Http r = api("POST", "/api/reiniciar", null);
+        assertEquals(200, r.status(), r.cuerpo().toString());
+
+        NodoRaft lider = esperarLider(null);
+        assertTrue(lider.termino() <= 3, "la elección arranca desde el término 0: " + lider.termino());
+        for (int id = 1; id <= 3; id++) {
+            assertEquals(0, votosEn(id));
+            assertFalse(raft(id).estaPausado());
+        }
+        esperarHasta(() -> nodos.stream().allMatch(n -> n.raft().estado().longitudLog() <= 2), "logs casi vacíos (solo noop)");
+        assertTrue(gateway.central().historial().stream().noneMatch(e -> "RECIBIDO_HTTP".equals(e.etapa())),
+                "el historial de eventos se vació");
+        for (DireccionNodo d : DIRS) {
+            assertTrue(Files.readAllLines(datos.resolve("nodo-" + d.id()).resolve("votos.txt")).stream().allMatch(l -> l.startsWith("#")));
+            assertTrue(Files.readAllLines(datos.resolve("nodo-" + d.id()).resolve("eventos.log")).stream().noneMatch(l -> l.contains("71555666") || l.contains("RECIBIDO_RMI")));
+        }
+        assertTrue(Files.readAllLines(datos.resolve("gateway").resolve("usuarios.log")).stream().allMatch(l -> l.startsWith("#")));
+
+        // y el sistema sigue funcionando: la misma cédula puede votar de nuevo
+        assertEquals(200, api("POST", "/api/votos", voto("Mario Luna", "71555666", "C2")).status());
         esperarHasta(() -> votosEn(1) == 1 && votosEn(2) == 1 && votosEn(3) == 1, "nuevo voto replicado");
     }
 }

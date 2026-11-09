@@ -46,6 +46,13 @@ class AlmacenVotos {
     }
 
     /** Orden de borrado confirmada: deja el archivo solo con la cabecera y una marca del borrado. */
+    /** Reinicio total: el archivo queda como recién creado. */
+    synchronized void reiniciarDesdeCero() throws IOException {
+        Files.writeString(archivo, "# Votos confirmados del nodo " + nodoId + " (reiniciado " + Instant.now() + ")"
+                + System.lineSeparator() + CABECERA + System.lineSeparator(), StandardCharsets.UTF_8);
+        lineas = 0;
+    }
+
     synchronized void reiniciar(EntradaLog orden) throws IOException {
         Files.writeString(archivo, "# Votos confirmados del nodo " + nodoId + System.lineSeparator()
                 + "# Votos borrados el " + Instant.now() + " por la orden #" + orden.indice() + " (término "

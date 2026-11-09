@@ -145,6 +145,7 @@ Hay que abrir en el firewall los puertos 1100–1103, 8080 y 8081. El gateway ta
 | POST | `/api/votos` | Registrar voto: `{"nombre":"Ana Pérez","cedula":"1012345678","candidato":"C1"}` |
 | GET | `/api/votos` | Votos registrados (cédula enmascarada) |
 | DELETE | `/api/votos` | Borra todos los votos de todo el clúster. Se replica por Raft como una entrada `REINICIO` del log |
+| POST | `/api/reiniciar` | **Vaciar todo**: votos, log de Raft, término, `votos.txt`, `eventos.log` y `usuarios.log`. Los nodos arrancan de cero y eligen un líder nuevo. Exige los 3 procesos encendidos |
 | GET | `/api/resultados` | Conteo y porcentaje por candidato |
 | GET | `/api/cluster` | Estado de cada nodo: rol, término, líder, log, réplicas |
 | POST | `/api/cluster/{id}/pausar` | Simula la caída de un nodo |

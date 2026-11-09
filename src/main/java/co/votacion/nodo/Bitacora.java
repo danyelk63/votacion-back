@@ -45,6 +45,14 @@ class Bitacora {
         }
     }
 
+    /** Deja el archivo eventos.log vacío (reinicio total del sistema). */
+    synchronized void vaciarArchivo() {
+        try {
+            Files.writeString(archivo, "", StandardCharsets.UTF_8);
+        } catch (IOException ignorada) {
+        }
+    }
+
     Path archivo() {
         return archivo;
     }
