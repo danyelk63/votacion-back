@@ -1,0 +1,11 @@
+# Blueprint de Render: un servicio web gratuito con Docker.
+services:
+  - type: web
+    name: votacion-back
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /salud
+    autoDeploy: true

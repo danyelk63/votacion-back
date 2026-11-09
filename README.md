@@ -192,3 +192,14 @@ mvn test
 - Sin base de datos ni disco: si se apagan **todos** los nodos, se pierden los votos. Si se cae solo una minoría, no se pierde nada.
 - Membresía fija del clúster (no se agregan nodos en caliente) y sin snapshots del log.
 - El gateway es un único proceso. Se pueden levantar varios gateways apuntando a los mismos nodos, porque no guardan estado.
+
+## Publicación en Render (gratis)
+
+El repo incluye un [`Dockerfile`](Dockerfile) y un [`render.yaml`](render.yaml). Como Render da **una sola máquina y un solo puerto público**, el contenedor arranca ([`docker/arranque.sh`](docker/arranque.sh)):
+
+- los **3 nodos y el gateway como 4 procesos JVM independientes**, que se siguen comunicando por RMI igual que en local;
+- **nginx** en el puerto público: `/ws` va al WebSocket (8081) y el resto al REST (8080).
+
+Las 4 JVM más nginx usan unos 240 MB, por debajo de los 512 MB del plan gratuito.
+
+En el plan gratuito, el servicio **se duerme tras unos 15 minutos sin tráfico** y tarda cerca de un minuto en despertar. Como los votos están en memoria, al dormirse se pierden.

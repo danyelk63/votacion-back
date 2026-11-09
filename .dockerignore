@@ -1,0 +1,5 @@
+target/
+datos/
+.git/
+*.iml
+.idea/
